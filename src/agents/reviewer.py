@@ -1,229 +1,211 @@
-"""Reviewer agent - performs code review."""
+"""Reviewer agent - Code review and quality gates."""
 
-import json
+from datetime import datetime
 from typing import Any
 
-from src.agents.base import BaseAgent
-from src.core.state import OrchestrationState, AgentRole
-from src.tools.github import get_pr_details, get_pr_diff, add_pr_review, add_pr_comment
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from src.config import get_settings
+from src.core.state import AgentResult, AgentRole, OrchestrationState, TaskStatus
+from src.tools.github import GitHubTools
 
 
-class ReviewerAgent(BaseAgent):
-    """Reviews code changes and provides feedback."""
+REVIEWER_SYSTEM_PROMPT = """You are an elite Senior Engineer performing thorough code reviews.
 
-    def __init__(self):
-        super().__init__(role=AgentRole.REVIEWER, temperature=0.1)
+Your responsibilities:
+- Review code for correctness, maintainability, and adherence to standards
+- Check for security vulnerabilities and anti-patterns
+- Ensure tests provide adequate coverage
+- Verify documentation is clear and complete
+- Provide constructive feedback with specific suggestions
+- Approve when quality standards are met
+- Request changes when issues are found
 
-    def get_system_prompt(self) -> str:
-        return """You are an elite Senior Staff Engineer conducting thorough code reviews.
-
-Your review checklist:
-1. **Architecture & Design**
-   - Follows established patterns
-   - Appropriate abstraction levels
-   - Scalable and maintainable
-
-2. **Code Quality**
-   - Clear, readable, self-documenting
-   - Proper error handling
-   - Type hints and validation
-   - No code smells or anti-patterns
-
-3. **Testing**
-   - Adequate test coverage
-   - Tests are meaningful and robust
-   - Edge cases covered
-
-4. **Security**
-   - No hardcoded secrets
-   - Input validation
-   - Proper authentication/authorization
-
-5. **Performance**
-   - No obvious bottlenecks
-   - Efficient algorithms
-   - Proper resource management
-
-6. **Documentation**
-   - Clear docstrings
-   - Updated README if needed
-   - Comments where necessary
+Review checklist:
+1. **Correctness**: Does the code do what it's supposed to?
+2. **Readability**: Is it easy to understand? Are names clear?
+3. **Maintainability**: Can it be easily modified in the future?
+4. **Performance**: Any obvious inefficiencies?
+5. **Security**: Input validation, authentication, secrets handling?
+6. **Testing**: Adequate test coverage? Edge cases handled?
+7. **Documentation**: Docstrings, comments, README updates?
+8. **Consistency**: Follows project conventions and patterns?
 
 Output format:
-{
-  "decision": "approve|request_changes|comment",
-  "summary": "Overall assessment",
-  "strengths": ["positive aspect 1", "positive aspect 2"],
-  "issues": [
-    {
-      "severity": "critical|major|minor|nitpick",
-      "category": "architecture|quality|testing|security|performance|docs",
-      "description": "Clear description of the issue",
-      "suggestion": "Specific actionable fix",
-      "file": "path/to/file.py",
-      "line": 42
-    }
-  ],
-  "next_steps": ["action 1", "action 2"]
-}
-
-Be constructive, specific, and focus on what matters most."""
-
-    async def execute(self, state: OrchestrationState) -> dict[str, Any]:
-        """Execute review workflow."""
-        repo = state["repo"]
-        prs_created = state.get("prs_created", [])
-        pr_number = state.get("pr_number") or (prs_created[-1] if prs_created else None)
-
-        if not pr_number:
-            return {
-                "output": "No PR to review",
-                "artifacts": {},
-                "metadata": {"status": "skipped"},
-            }
-
-        # Get PR details and diff
-        pr_details = await get_pr_details(repo, pr_number)
-        pr_diff = await get_pr_diff(repo, pr_number)
-
-        # Context from previous agents
-        plan = state.get("plan", {})
-        test_results = state.get("test_results", {})
-
-        # Perform review
-        user_message = f"""Review the following pull request:
-
-**PR #{pr_number}: {pr_details['title']}**
-
-{pr_details['body']}
-
-**Implementation Plan:**
-Summary: {plan.get('summary', 'N/A')}
-Approach: {plan.get('approach', 'N/A')}
-
-**Test Results:**
-Passed: {test_results.get('passed', 'Unknown')}
-Coverage: {test_results.get('coverage', {}).get('percentage', 'Unknown')}%
-Failures: {len(test_results.get('failures', []))}
-
-**Diff:**
-```diff
-{pr_diff[:5000]}...
-```
-
-Provide a comprehensive code review following the checklist.
-Return JSON with 'decision', 'summary', 'strengths', 'issues', and 'next_steps'."""
-
-        review_json = await self._call_llm(self.get_system_prompt(), user_message)
-
-        # Parse review
-        try:
-            if "```json" in review_json:
-                review_json = review_json.split("```json")[1].split("```")[0].strip()
-            elif "```" in review_json:
-                review_json = review_json.split("```")[1].split("```")[0].strip()
-
-            review = json.loads(review_json)
-        except json.JSONDecodeError:
-            self.logger.error("Failed to parse review JSON")
-            # Fallback to comment-only review
-            review = {
-                "decision": "comment",
-                "summary": review_json[:500],
-                "strengths": [],
-                "issues": [],
-                "next_steps": [],
-            }
-
-        # Post review on GitHub
-        await self._post_review(repo, pr_number, review)
-
-        # Determine approval status
-        approval_status = self._map_decision_to_status(review["decision"])
-
-        # Extract actionable comments
-        review_comments = [
-            {
-                "severity": issue["severity"],
-                "description": issue["description"],
-                "suggestion": issue["suggestion"],
-                "file": issue.get("file"),
-                "line": issue.get("line"),
-            }
-            for issue in review.get("issues", [])
-            if issue["severity"] in ["critical", "major"]
-        ]
-
-        return {
-            "output": f"Review completed: {review['decision']} with {len(review.get('issues', []))} issues",
-            "approval_status": approval_status,
-            "review_comments": state.get("review_comments", []) + review_comments,
-            "artifacts": {
-                "review": review,
-                "pr_url": pr_details["url"],
-            },
-            "metadata": {
-                "decision": review["decision"],
-                "issues_count": len(review.get("issues", [])),
-                "critical_issues": len([i for i in review.get("issues", []) if i["severity"] == "critical"]),
-            },
-        }
-
-    async def _post_review(
-        self, repo: str, pr_number: int, review: dict[str, Any]
-    ) -> None:
-        """Post review as GitHub PR review."""
-        decision_emoji = {"approve": "✅", "request_changes": "🔴", "comment": "💬"}
-        emoji = decision_emoji.get(review["decision"], "💬")
-
-        body = f"""## {emoji} Code Review
-
-**Decision:** {review['decision'].replace('_', ' ').title()}
-
-### Summary
-{review['summary']}
-
-### Strengths
-{chr(10).join([f"- ✅ {s}" for s in review.get('strengths', [])])}
+- Overall assessment (APPROVE, REQUEST_CHANGES, COMMENT)
+- Specific issues with file/line references
+- Suggestions for improvement
+- Required changes before approval
 """
-
-        if review.get("issues"):
-            body += "\n### Issues\n"
-            for issue in review["issues"]:
-                severity_emoji = {
-                    "critical": "🔴",
-                    "major": "🟠",
-                    "minor": "🟡",
-                    "nitpick": "🔵",
-                }
-                emoji = severity_emoji.get(issue["severity"], "⚪")
-                body += f"\n**{emoji} {issue['severity'].title()} - {issue['category'].title()}**\n"
-                body += f"{issue['description']}\n"
-                if issue.get("suggestion"):
-                    body += f"*Suggestion:* {issue['suggestion']}\n"
-                if issue.get("file"):
-                    body += f"*File:* `{issue['file']}` line {issue.get('line', '?')}\n"
-
-        if review.get("next_steps"):
-            body += "\n### Next Steps\n"
-            body += chr(10).join([f"- {step}" for step in review["next_steps"]])
-
-        body += "\n\n---\n*Automated review by AI Orchestration Platform*"
-
-        # Post as PR comment (in production: use PR review API)
-        await add_pr_comment(repo, pr_number, body)
-
-    def _map_decision_to_status(self, decision: str) -> str:
-        """Map review decision to approval status."""
-        mapping = {
-            "approve": "approved",
-            "request_changes": "changes_requested",
-            "comment": "commented",
-        }
-        return mapping.get(decision, "commented")
 
 
 async def reviewer_node(state: OrchestrationState) -> dict[str, Any]:
-    """LangGraph node for reviewer agent."""
-    agent = ReviewerAgent()
-    return await agent.invoke(state)
+    """Review the PR and provide feedback."""
+    settings = get_settings()
+    github = GitHubTools()
+
+    repo = state["repo"]
+    pr_number = state.get("prs_created", [None])[-1]
+
+    if not pr_number:
+        return {
+            "messages": [HumanMessage(content="No PR to review")],
+            "current_agent": AgentRole.REVIEWER,
+        }
+
+    # Get PR details
+    pr_diff = await github.get_pr_diff(repo, pr_number)
+    pr_files = await github.get_pr_files(repo, pr_number)
+    test_results = state.get("test_results", {})
+
+    # Get plan for context
+    plan = state.get("plan", {})
+    acceptance_criteria = plan.get("acceptance_criteria", "Meets requirements")
+
+    # Prepare review prompt
+    messages = [
+        SystemMessage(content=REVIEWER_SYSTEM_PROMPT),
+        HumanMessage(
+            content=f"""Review this pull request:
+
+**PR #{pr_number}**
+
+**Acceptance Criteria:**
+{acceptance_criteria}
+
+**Test Results:**
+Passed: {test_results.get('passed', 'N/A')}
+Failed: {test_results.get('failed', 'N/A')}
+
+**Changes:**
+{_format_diff(pr_diff)}
+
+**Files:**
+{_format_files(pr_files)}
+
+Provide a comprehensive code review."""
+        ),
+    ]
+
+    # Initialize LLM
+    llm = ChatAnthropic(
+        model=settings.default_agent_model,
+        temperature=0.3,
+        api_key=settings.anthropic_api_key,
+    )
+
+    # Get review
+    response = await llm.ainvoke(messages)
+    review_content = response.content
+
+    # Parse review
+    approval_status, comments = _parse_review(review_content)
+
+    # Post review comments to GitHub
+    if comments:
+        for comment in comments:
+            await github.add_review_comment(
+                repo=repo,
+                pr_number=pr_number,
+                body=comment["body"],
+                path=comment.get("path"),
+                line=comment.get("line"),
+            )
+
+    # Submit review
+    await github.submit_review(
+        repo=repo,
+        pr_number=pr_number,
+        event=approval_status,
+        body=review_content,
+    )
+
+    # Create result
+    result: AgentResult = {
+        "agent": AgentRole.REVIEWER,
+        "status": TaskStatus.COMPLETED,
+        "output": review_content,
+        "artifacts": {
+            "approval_status": approval_status,
+            "comments": comments,
+            "pr_number": pr_number,
+        },
+        "metadata": {
+            "model": settings.default_agent_model,
+            "comments_count": len(comments),
+        },
+        "timestamp": datetime.now(),
+    }
+
+    return {
+        "review_comments": comments,
+        "approval_status": approval_status,
+        "agent_results": state.get("agent_results", []) + [result],
+        "current_agent": AgentRole.REVIEWER,
+        "messages": [
+            HumanMessage(content=f"Review completed: {approval_status} with {len(comments)} comments")
+        ],
+    }
+
+
+def _format_diff(diff: str) -> str:
+    """Format diff for prompt (truncate if too long)."""
+    if len(diff) > 4000:
+        return diff[:4000] + "\n... (truncated)"
+    return diff
+
+
+def _format_files(files: dict[str, str]) -> str:
+    """Format files for prompt."""
+    formatted = []
+    for path, content in files.items():
+        # Truncate large files
+        display_content = content if len(content) < 1000 else content[:1000] + "\n... (truncated)"
+        formatted.append(f"### {path}\n```\n{display_content}\n```")
+    return "\n\n".join(formatted)
+
+
+def _parse_review(content: str) -> tuple[str, list[dict[str, Any]]]:
+    """Parse review content to extract approval status and comments."""
+    # Determine approval status
+    content_lower = content.lower()
+    if "approve" in content_lower and "request changes" not in content_lower:
+        status = "APPROVE"
+    elif "request changes" in content_lower or "must fix" in content_lower:
+        status = "REQUEST_CHANGES"
+    else:
+        status = "COMMENT"
+
+    # Extract specific comments (simplified)
+    comments = []
+    lines = content.split("\n")
+    current_comment = {}
+
+    for line in lines:
+        # Look for file/line references
+        if "file:" in line.lower() or "line:" in line.lower():
+            if current_comment:
+                comments.append(current_comment)
+            current_comment = {"body": ""}
+
+            # Extract file path
+            if "file:" in line.lower():
+                file_part = line.split("file:")[-1].strip()
+                current_comment["path"] = file_part.split()[0].strip("`'\"")
+
+            # Extract line number
+            if "line:" in line.lower():
+                line_part = line.split("line:")[-1].strip()
+                try:
+                    current_comment["line"] = int(line_part.split()[0])
+                except ValueError:
+                    pass
+
+        elif current_comment and line.strip():
+            current_comment["body"] += line + "\n"
+
+    if current_comment:
+        comments.append(current_comment)
+
+    return status, comments

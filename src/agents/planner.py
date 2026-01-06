@@ -1,156 +1,180 @@
-"""Planner agent: Research requirements and decompose into tasks."""
+"""Planner agent - Research and task decomposition using Perplexity MCP."""
 
+from datetime import datetime
 from typing import Any
 
-from src.agents.base import BaseAgent
-from src.core.state import AgentRole, OrchestrationState
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from src.config import get_settings
+from src.core.state import AgentResult, AgentRole, OrchestrationState, TaskStatus
 from src.tools.perplexity import PerplexityMCP
 from src.tools.github import GitHubTools
 
-PLANNER_SYSTEM_PROMPT = """You are an elite Software Architect and Tech Lead at a top Silicon Valley startup.
+
+PLANNER_SYSTEM_PROMPT = """You are an elite CTO/Tech Lead for an autonomous software development team.
 
 Your role:
-1. Deeply understand requirements from GitHub issues or specifications
-2. Research best practices, patterns, and similar implementations using Perplexity
-3. Break down work into clear, actionable tasks for implementation team
-4. Identify technical risks, dependencies, and architectural decisions
-5. Specify test scenarios and acceptance criteria
+- Analyze GitHub issues or specifications to understand requirements
+- Research similar implementations and best practices using Perplexity
+- Break down work into concrete, parallelizable tasks
+- Define acceptance criteria and testing requirements
+- Set architectural constraints and quality standards
 
 You have access to:
-- Perplexity: For researching patterns, libraries, best practices
-- GitHub API: For reading issues, existing code, project structure
+- Perplexity search for research (latest patterns, libraries, examples)
+- GitHub API to read issues, analyze codebase, check existing patterns
 
-Output a structured plan in JSON format:
-{
-  "overview": "High-level summary",
-  "research_findings": ["Key insights from research"],
-  "architecture_decisions": [{"decision": "...", "rationale": "..."}],
-  "tasks": [
-    {
-      "id": "task-1",
-      "title": "Implement X",
-      "description": "Detailed requirements",
-      "files": ["path/to/file.py"],
-      "dependencies": ["task-0"],
-      "acceptance_criteria": ["..."],
-      "estimated_complexity": "low|medium|high"
-    }
-  ],
-  "test_scenarios": ["Scenario 1", "Scenario 2"],
-  "risks": ["Risk 1", "Risk 2"]
-}
+Output a structured plan with:
+1. **Context**: Summary of the requirement and research findings
+2. **Architecture**: Key decisions, patterns to follow, files to modify/create
+3. **Tasks**: Ordered list of implementation tasks with clear inputs/outputs
+4. **Acceptance Criteria**: How to validate success
+5. **Testing Requirements**: Unit tests, integration tests, edge cases
 
-Be thorough but concise. Focus on actionable technical details.
+Be specific about file paths, function names, and implementation approaches.
+Consider scalability, maintainability, and security from the start.
 """
 
 
-class PlannerAgent(BaseAgent):
-    """Agent responsible for research and task planning."""
+async def planner_node(state: OrchestrationState) -> dict[str, Any]:
+    """Plan the work by researching and decomposing into tasks."""
+    settings = get_settings()
 
-    def __init__(self):
-        super().__init__(AgentRole.PLANNER, PLANNER_SYSTEM_PROMPT)
-        self.perplexity = PerplexityMCP()
-        self.github = GitHubTools()
+    # Initialize tools
+    perplexity = PerplexityMCP()
+    github = GitHubTools()
 
-    async def execute(self, state: OrchestrationState) -> tuple[str, dict[str, Any]]:
-        """Execute planning: research + task decomposition."""
-        repo = state["repo"]
-        issue_number = state.get("issue_number")
-        spec_content = state.get("spec_content")
+    # Get context from GitHub issue or spec
+    context = ""
+    if state.get("issue_number"):
+        issue = await github.get_issue(state["repo"], state["issue_number"])
+        context = f"GitHub Issue #{issue['number']}: {issue['title']}\n\n{issue['body']}"
+    elif state.get("spec_content"):
+        context = f"Specification:\n{state['spec_content']}"
+    else:
+        context = "No specific requirement provided - analyzing repository"
 
-        # 1. Gather requirements
-        if issue_number:
-            issue = await self.github.get_issue(repo, issue_number)
-            requirements = f"GitHub Issue #{issue_number}:\n{issue['title']}\n\n{issue['body']}"
-        elif spec_content:
-            requirements = f"Specification:\n{spec_content}"
-        else:
-            raise ValueError("Either issue_number or spec_content must be provided")
+    # Research similar implementations
+    research_query = f"Best practices and implementation patterns for: {context[:200]}"
+    research_results = await perplexity.search(research_query)
 
-        # 2. Research with Perplexity
-        research_queries = self._extract_research_queries(requirements)
-        research_results = []
-        for query in research_queries[:3]:  # Limit to 3 queries
-            result = await self.perplexity.search(query)
-            research_results.append(f"Query: {query}\nResults: {result}")
+    # Analyze existing codebase
+    repo_structure = await github.get_repo_structure(state["repo"])
+    existing_patterns = await github.analyze_code_patterns(state["repo"])
 
-        # 3. Get repository context
-        repo_structure = await self.github.get_repository_structure(repo)
-        readme = await self.github.get_file_contents(repo, "README.md") or "No README"
+    # Build prompt for planning
+    messages = [
+        SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+        HumanMessage(
+            content=f"""Plan the implementation for this requirement:
 
-        # 4. Generate plan with LLM
-        user_message = f"""Requirements:
-{requirements}
+{context}
 
----
-Research Findings:
-{chr(10).join(research_results)}
+**Research Results:**
+{research_results}
 
----
-Repository Structure:
+**Current Repository Structure:**
 {repo_structure}
 
-README:
-{readme[:2000]}...
+**Existing Patterns:**
+{existing_patterns}
 
----
-Create a detailed implementation plan.
-"""
+Provide a detailed implementation plan."""
+        ),
+    ]
 
-        messages = self._format_messages(user_message)
-        response = await self.llm.ainvoke(messages)
+    # Initialize LLM
+    llm = ChatAnthropic(
+        model=settings.default_agent_model,
+        temperature=0.3,
+        api_key=settings.anthropic_api_key,
+    )
 
-        plan_text = response.content
+    # Get plan from LLM
+    response = await llm.ainvoke(messages)
+    plan_content = response.content
 
-        # Parse JSON from response (extract from markdown if needed)
-        import json
-        import re
+    # Parse plan into structured format
+    plan = _parse_plan(plan_content)
+    tasks = _extract_tasks(plan)
 
-        json_match = re.search(r"```json\n(.*)\n```", plan_text, re.DOTALL)
-        if json_match:
-            plan_json = json.loads(json_match.group(1))
-        else:
-            # Try parsing entire response
-            try:
-                plan_json = json.loads(plan_text)
-            except json.JSONDecodeError:
-                # Fallback: create basic structure
-                plan_json = {
-                    "overview": "Failed to parse plan",
-                    "tasks": [{"id": "task-1", "title": "Review plan manually"}],
-                }
+    # Create agent result
+    result: AgentResult = {
+        "agent": AgentRole.PLANNER,
+        "status": TaskStatus.COMPLETED,
+        "output": plan_content,
+        "artifacts": {"plan": plan, "tasks": tasks, "research": research_results},
+        "metadata": {"model": settings.default_agent_model, "temperature": 0.3},
+        "timestamp": datetime.now(),
+    }
 
-        return plan_text, {"plan": plan_json, "research": research_results}
-
-    def _extract_research_queries(self, requirements: str) -> list[str]:
-        """Extract key research queries from requirements."""
-        # Simple heuristic: look for technology names, frameworks, patterns
-        queries = []
-
-        # Default query
-        queries.append(f"Best practices for: {requirements[:100]}")
-
-        # Look for specific technologies
-        keywords = ["python", "typescript", "react", "fastapi", "docker", "kubernetes"]
-        for keyword in keywords:
-            if keyword.lower() in requirements.lower():
-                queries.append(f"{keyword} implementation patterns examples")
-
-        return queries[:3]
+    return {
+        "plan": plan,
+        "tasks": tasks,
+        "agent_results": [result],
+        "current_agent": AgentRole.PLANNER,
+        "messages": [HumanMessage(content=f"Plan completed: {len(tasks)} tasks identified")],
+    }
 
 
-async def planner_node(state: OrchestrationState) -> OrchestrationState:
-    """LangGraph node for planner agent."""
-    agent = PlannerAgent()
-    result = await agent.invoke(state)
+def _parse_plan(content: str) -> dict[str, Any]:
+    """Parse LLM output into structured plan."""
+    # Simple parsing - in production, use more robust extraction
+    return {
+        "raw_content": content,
+        "context": _extract_section(content, "Context"),
+        "architecture": _extract_section(content, "Architecture"),
+        "acceptance_criteria": _extract_section(content, "Acceptance Criteria"),
+        "testing_requirements": _extract_section(content, "Testing Requirements"),
+    }
 
-    # Update state
-    state["agent_results"].append(result)
-    state["current_agent"] = AgentRole.PLANNER
 
-    if result["status"] == "completed":
-        plan_data = result["artifacts"].get("plan", {})
-        state["plan"] = plan_data
-        state["tasks"] = plan_data.get("tasks", [])
+def _extract_tasks(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract individual tasks from plan."""
+    # Parse task list from raw content
+    raw = plan.get("raw_content", "")
+    tasks = []
 
-    return state
+    # Simple task extraction - look for numbered lists or task markers
+    lines = raw.split("\n")
+    current_task = None
+
+    for line in lines:
+        line = line.strip()
+        # Detect task lines (e.g., "1. Create file...", "- Implement...")
+        if line and (line[0].isdigit() or line.startswith("-") or line.startswith("*")):
+            if current_task:
+                tasks.append(current_task)
+            current_task = {
+                "description": line.lstrip("0123456789.-* "),
+                "status": "pending",
+                "assignee": "coder",
+            }
+        elif current_task and line:
+            # Continuation of current task
+            current_task["description"] += " " + line
+
+    if current_task:
+        tasks.append(current_task)
+
+    return tasks
+
+
+def _extract_section(content: str, section_name: str) -> str:
+    """Extract a specific section from the plan."""
+    lines = content.split("\n")
+    in_section = False
+    section_content = []
+
+    for line in lines:
+        if section_name.lower() in line.lower() and ("**" in line or "##" in line):
+            in_section = True
+            continue
+        elif in_section and line.strip().startswith(("**", "##")):
+            # Next section started
+            break
+        elif in_section:
+            section_content.append(line)
+
+    return "\n".join(section_content).strip()

@@ -1,4 +1,4 @@
-"""Agent implementations for the orchestration platform."""
+"""Agent implementations for orchestration."""
 
 from .planner import planner_node
 from .coder import coder_node

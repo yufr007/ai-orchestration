@@ -1,6 +1,5 @@
-"""Planner agent: Research and task decomposition using Perplexity MCP."""
+"""Planner agent - Research and task decomposition using Perplexity MCP."""
 
-import json
 from datetime import datetime
 from typing import Any
 
@@ -9,34 +8,48 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import get_settings
 from src.core.state import AgentResult, AgentRole, OrchestrationState, TaskStatus
-from src.tools.perplexity import perplexity_research
+from src.tools.perplexity import research_with_perplexity
 from src.tools.github import get_issue_details, get_pr_details
 
-settings = get_settings()
 
-PLANNER_SYSTEM_PROMPT = """You are an elite Tech Lead responsible for planning software implementations.
+PLANNER_SYSTEM_PROMPT = """You are an elite Tech Lead / CTO planning software implementations.
 
 Your responsibilities:
-1. Research the problem domain using Perplexity to gather best practices and patterns
-2. Analyze the issue/spec to understand requirements and acceptance criteria
-3. Break down the work into concrete, actionable tasks
-4. Identify dependencies and suggest implementation order
-5. Consider edge cases, error handling, and testing requirements
-6. Propose architecture decisions when needed
+1. Research best practices and patterns using Perplexity
+2. Analyze requirements from GitHub issues or specs
+3. Break down work into actionable, parallelizable tasks
+4. Define file-level changes with clear acceptance criteria
+5. Identify dependencies and execution order
+6. Ensure plans follow production-grade standards
 
-Output a structured JSON plan with:
-- summary: Brief overview of the implementation
-- research_findings: Key insights from Perplexity research
-- tasks: Array of tasks with {id, title, description, dependencies, estimated_complexity, files_to_modify}
-- risks: Potential issues to watch for
-- testing_strategy: How this should be tested
+Output Format:
+{
+  "tasks": [
+    {
+      "id": "task-1",
+      "title": "Brief description",
+      "type": "create|update|delete|test",
+      "files": ["path/to/file.py"],
+      "dependencies": ["task-0"],
+      "acceptance_criteria": ["Criterion 1", "Criterion 2"],
+      "priority": 1
+    }
+  ],
+  "research_findings": {
+    "patterns": ["Pattern 1", "Pattern 2"],
+    "risks": ["Risk 1"],
+    "recommendations": ["Rec 1"]
+  },
+  "estimated_complexity": "low|medium|high"
+}
 
-Be thorough but concise. Focus on actionable guidance for the implementation team."""
+Be thorough but concise. Think in terms of production systems that will be maintained long-term.
+"""
 
 
 async def planner_node(state: OrchestrationState) -> dict[str, Any]:
-    """Execute the planner agent to create implementation plan."""
-    print("\n🎯 PLANNER: Starting planning phase...")
+    """Planner agent node - research and create execution plan."""
+    settings = get_settings()
 
     # Initialize LLM
     llm = ChatAnthropic(
@@ -46,87 +59,118 @@ async def planner_node(state: OrchestrationState) -> dict[str, Any]:
     )
 
     # Gather context
-    context_parts = []
+    repo = state["repo"]
+    issue_number = state.get("issue_number")
+    spec_content = state.get("spec_content")
+
+    context = {}
 
     # Get issue details if provided
-    if state.get("issue_number"):
-        issue = await get_issue_details(state["repo"], state["issue_number"])
-        context_parts.append(f"**Issue #{state['issue_number']}:**\n{issue['title']}\n\n{issue['body']}")
+    if issue_number:
+        issue_data = await get_issue_details(repo, issue_number)
+        context["issue"] = issue_data
 
-    # Get PR details if provided
-    if state.get("pr_number"):
-        pr = await get_pr_details(state["repo"], state["pr_number"])
-        context_parts.append(f"**PR #{state['pr_number']}:**\n{pr['title']}\n\n{pr['body']}")
+    # Get PR details if in review mode
+    pr_number = state.get("pr_number")
+    if pr_number:
+        pr_data = await get_pr_details(repo, pr_number)
+        context["pr"] = pr_data
 
-    # Add spec content if provided
-    if state.get("spec_content"):
-        context_parts.append(f"**Specification:**\n{state['spec_content']}")
+    # Research with Perplexity
+    research_queries = []
+    if issue_number and context.get("issue"):
+        title = context["issue"].get("title", "")
+        research_queries.append(f"Best practices for implementing: {title}")
+        research_queries.append(f"Common pitfalls when implementing: {title}")
 
-    context = "\n\n".join(context_parts)
+    research_findings = []
+    if research_queries:
+        for query in research_queries[:2]:  # Limit to 2 queries
+            result = await research_with_perplexity(query)
+            research_findings.append(result)
 
-    if not context:
-        return {
-            "error": "No input provided (issue, PR, or spec)",
-            "agent_results": [
-                AgentResult(
-                    agent=AgentRole.PLANNER,
-                    status=TaskStatus.FAILED,
-                    output="No context available for planning",
-                    artifacts={},
-                    metadata={},
-                    timestamp=datetime.now(),
-                )
-            ],
-        }
+    # Build prompt
+    user_content = f"""Repository: {repo}
 
-    # Research using Perplexity
-    print("🔍 PLANNER: Researching best practices...")
-    research_query = f"Best practices and implementation patterns for: {context[:200]}..."
-    research_results = await perplexity_research(research_query)
+"""
 
-    # Create plan
-    print("📝 PLANNER: Creating implementation plan...")
+    if context.get("issue"):
+        issue = context["issue"]
+        user_content += f"""Issue #{issue_number}: {issue.get('title', '')}
+{issue.get('body', '')}
+
+"""
+
+    if spec_content:
+        user_content += f"""Specification:
+{spec_content}
+
+"""
+
+    if research_findings:
+        user_content += """Research Findings:
+"""
+        for i, finding in enumerate(research_findings, 1):
+            user_content += f"""
+{i}. {finding.get('summary', '')}
+   Key points: {', '.join(finding.get('key_points', []))}
+"""
+
+    user_content += """\n\nCreate a detailed implementation plan with specific tasks, file changes, and acceptance criteria."""
+
+    # Call LLM
     messages = [
         SystemMessage(content=PLANNER_SYSTEM_PROMPT),
-        HumanMessage(
-            content=f"""Context:
-{context}
-
-Research findings:
-{research_results}
-
-Create a detailed implementation plan in JSON format."""
-        ),
+        HumanMessage(content=user_content),
     ]
 
     response = await llm.ainvoke(messages)
-    plan_text = response.content
 
-    # Parse plan (extract JSON from markdown if needed)
+    # Parse response (in production, use structured output)
+    import json
+
     try:
-        if "```json" in plan_text:
-            plan_text = plan_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in plan_text:
-            plan_text = plan_text.split("```")[1].split("```")[0].strip()
-        plan = json.loads(plan_text)
+        plan = json.loads(response.content)
     except json.JSONDecodeError:
-        print("⚠️  PLANNER: Failed to parse JSON, using raw text")
-        plan = {"summary": plan_text, "tasks": [], "research_findings": research_results}
+        # Fallback: extract JSON from markdown code blocks
+        content = response.content
+        if "```json" in content:
+            json_start = content.find("```json") + 7
+            json_end = content.find("```", json_start)
+            plan = json.loads(content[json_start:json_end].strip())
+        else:
+            # Fallback plan
+            plan = {
+                "tasks": [
+                    {
+                        "id": "task-1",
+                        "title": "Implement feature",
+                        "type": "update",
+                        "files": [],
+                        "dependencies": [],
+                        "acceptance_criteria": ["Feature works"],
+                        "priority": 1,
+                    }
+                ],
+                "research_findings": {},
+                "estimated_complexity": "medium",
+            }
 
-    print(f"✅ PLANNER: Created plan with {len(plan.get('tasks', []))} tasks")
+    # Create agent result
+    agent_result: AgentResult = {
+        "agent": AgentRole.PLANNER,
+        "status": TaskStatus.COMPLETED,
+        "output": response.content,
+        "artifacts": {"plan": plan, "research": research_findings},
+        "metadata": {"queries_executed": len(research_queries)},
+        "timestamp": datetime.now(),
+    }
 
+    # Update state
     return {
         "plan": plan,
         "tasks": plan.get("tasks", []),
+        "agent_results": [agent_result],
         "current_agent": AgentRole.PLANNER,
-        "agent_results": [
-            AgentResult(
-                agent=AgentRole.PLANNER,
-                status=TaskStatus.COMPLETED,
-                output=plan.get("summary", "Plan created"),
-                artifacts={"plan": plan, "research": research_results},
-                metadata={"task_count": len(plan.get("tasks", []))},
-                timestamp=datetime.now(),
-            )
-        ],
+        "messages": [response],
     }

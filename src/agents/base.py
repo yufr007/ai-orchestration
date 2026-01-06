@@ -1,83 +1,96 @@
 """Base agent class with common functionality."""
 
-from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
 
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.config import get_settings
-from src.core.state import AgentRole, AgentResult, OrchestrationState, TaskStatus
-from src.utils.logging import get_logger
+from src.core.state import AgentRole, TaskStatus, AgentResult
+import structlog
+
+logger = structlog.get_logger()
 
 
-class BaseAgent(ABC):
-    """Base class for all agents in the orchestration."""
+class BaseAgent:
+    """Base class for all agents with common LLM and logging setup."""
 
-    def __init__(self, role: AgentRole, system_prompt: str):
+    def __init__(
+        self,
+        role: AgentRole,
+        system_prompt: str,
+        temperature: float | None = None,
+        model: str | None = None,
+    ) -> None:
         self.role = role
         self.system_prompt = system_prompt
         self.settings = get_settings()
-        self.logger = get_logger(f"agent.{role.value}")
-        self.llm = self._create_llm()
+        self.logger = logger.bind(agent=role.value)
 
-    def _create_llm(self) -> BaseChatModel:
-        """Create the appropriate LLM based on configuration."""
+        # Initialize LLM
+        temperature = temperature or self.settings.default_temperature
+        model = model or self.settings.default_agent_model
+
         if self.settings.primary_llm_provider == "anthropic":
-            return ChatAnthropic(
-                model=self.settings.default_agent_model,
-                temperature=self.settings.default_temperature,
-                anthropic_api_key=self.settings.anthropic_api_key,
+            self.llm: BaseChatModel = ChatAnthropic(
+                api_key=self.settings.anthropic_api_key,
+                model=model,
+                temperature=temperature,
             )
         else:
-            return ChatOpenAI(
-                model=self.settings.default_agent_model.replace("claude", "gpt-4"),
-                temperature=self.settings.default_temperature,
-                openai_api_key=self.settings.openai_api_key,
+            self.llm: BaseChatModel = ChatOpenAI(
+                api_key=self.settings.openai_api_key,
+                model=model,
+                temperature=temperature,
             )
 
-    async def invoke(self, state: OrchestrationState) -> AgentResult:
-        """Execute the agent and return a result."""
-        self.logger.info(f"Starting {self.role.value} agent")
-        start_time = datetime.now()
+        self.logger.info(f"Initialized {role.value} agent", model=model, temperature=temperature)
 
-        try:
-            output, artifacts = await self.execute(state)
-            status = TaskStatus.COMPLETED
-            error = None
-        except Exception as e:
-            self.logger.error(f"{self.role.value} failed: {e}", exc_info=True)
-            output = f"Error: {str(e)}"
-            artifacts = {}
-            status = TaskStatus.FAILED
-            error = str(e)
+    def create_result(
+        self,
+        status: TaskStatus,
+        output: str,
+        artifacts: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AgentResult:
+        """Create a standardized agent result."""
+        return AgentResult(
+            agent=self.role,
+            status=status,
+            output=output,
+            artifacts=artifacts or {},
+            metadata=metadata or {},
+            timestamp=datetime.now(),
+        )
 
-        result: AgentResult = {
-            "agent": self.role,
-            "status": status,
-            "output": output,
-            "artifacts": artifacts,
-            "metadata": {
-                "duration_seconds": (datetime.now() - start_time).total_seconds(),
-                "error": error,
-            },
-            "timestamp": datetime.now(),
-        }
+    async def invoke_llm(self, user_message: str, context: dict[str, Any] | None = None) -> str:
+        """Invoke the LLM with system prompt and user message."""
+        messages = [SystemMessage(content=self.system_prompt)]
 
-        self.logger.info(f"{self.role.value} completed with status: {status.value}")
-        return result
+        # Add context if provided
+        if context:
+            context_str = "\n\n## Current Context:\n" + "\n".join(
+                f"**{k}**: {v}" for k, v in context.items()
+            )
+            messages.append(HumanMessage(content=context_str))
 
-    @abstractmethod
-    async def execute(self, state: OrchestrationState) -> tuple[str, dict[str, Any]]:
-        """Execute agent logic. Returns (output_message, artifacts_dict)."""
-        pass
+        messages.append(HumanMessage(content=user_message))
 
-    def _format_messages(self, user_message: str) -> list:
-        """Format system and user messages for LLM."""
-        return [
-            SystemMessage(content=self.system_prompt),
-            HumanMessage(content=user_message),
-        ]
+        self.logger.debug("Invoking LLM", messages_count=len(messages))
+        response = await self.llm.ainvoke(messages)
+        return response.content
+
+    def log_start(self, task: str) -> None:
+        """Log agent task start."""
+        self.logger.info(f"{self.role.value} starting", task=task)
+
+    def log_complete(self, task: str, status: TaskStatus) -> None:
+        """Log agent task completion."""
+        self.logger.info(f"{self.role.value} completed", task=task, status=status.value)
+
+    def log_error(self, task: str, error: Exception) -> None:
+        """Log agent error."""
+        self.logger.error(f"{self.role.value} failed", task=task, error=str(error), exc_info=True)

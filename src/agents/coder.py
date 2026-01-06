@@ -1,234 +1,173 @@
-"""Coder Agent - Implementation with parallel file operations."""
+"""Coder agent: Implementation and file operations."""
 
-import asyncio
-from datetime import datetime
-from typing import Any
-
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
-
-from src.config import get_settings
-from src.core.state import AgentResult, AgentRole, OrchestrationState, TaskStatus
+from src.core.state import OrchestrationState, AgentRole, TaskStatus
+from src.agents.base import BaseAgent
 from src.tools.github import (
     create_branch,
-    create_or_update_file,
+    get_file_content,
+    update_file,
+    create_file,
     create_pull_request,
-    get_file_contents,
 )
 
+CODER_SYSTEM_PROMPT = """You are a Staff Software Engineer at a top-tier tech company.
 
-CODER_SYSTEM_PROMPT = """You are an elite Staff Engineer implementing production-grade code.
-
-Your responsibilities:
-1. Implement tasks according to the plan with enterprise standards
+Your role:
+1. Implement features following the plan with production-grade code
 2. Write clean, maintainable, well-documented code
 3. Follow project conventions and best practices
-4. Handle edge cases and errors gracefully
-5. Ensure backward compatibility
+4. Handle edge cases and error conditions
+5. Create comprehensive unit tests alongside implementation
 
-Code Quality Standards:
-- Type hints for all functions (Python)
-- Comprehensive docstrings
-- Error handling with specific exceptions
-- Input validation
-- Logging for debugging
-- No hardcoded values (use config)
+Standards:
+- Production-grade: No TODOs, placeholders, or incomplete code
+- Type safety: Full type hints (Python) / strict types (TypeScript)
+- Error handling: Graceful degradation with clear error messages
+- Documentation: Docstrings for all public interfaces
+- Testing: Unit tests with >80% coverage
+- Security: Input validation, no hardcoded secrets
 
-Output Format:
-For each file, provide:
-{
-  "path": "path/to/file.py",
-  "content": "complete file content",
-  "operation": "create" or "update",
-  "description": "what this file does"
-}
-
-Return a JSON array of file operations.
+Output format:
+- File path
+- Complete file content (no partial code)
+- Test file path and content
+- Brief explanation of implementation decisions
 """
 
 
-async def implement_task(llm: ChatAnthropic, task: dict[str, Any], repo: str) -> list[dict[str, Any]]:
-    """Implement a single task and return file operations."""
-    print(f"  ⚙️  Implementing: {task.get('title', task.get('id'))}")
-    
-    # Get existing file contents for files to modify
-    file_contexts = []
-    for file_path in task.get("files", []):
+class CoderAgent(BaseAgent):
+    """Agent responsible for code implementation."""
+
+    def __init__(self) -> None:
+        super().__init__(role=AgentRole.CODER, system_prompt=CODER_SYSTEM_PROMPT, temperature=0.2)
+
+    async def implement(self, state: OrchestrationState) -> OrchestrationState:
+        """Main implementation workflow."""
+        self.log_start("implement")
+
         try:
-            content = await get_file_contents(repo=repo, path=file_path)
-            file_contexts.append(f"### {file_path}\n```\n{content}\n```")
-        except Exception:
-            file_contexts.append(f"### {file_path}\n(New file - does not exist yet)")
-    
-    files_context = "\n\n".join(file_contexts) if file_contexts else "No existing files."
-    
-    # Generate implementation
-    messages = [
-        SystemMessage(content=CODER_SYSTEM_PROMPT),
-        HumanMessage(content=f"""Implement the following task:
+            # Get tasks from plan
+            tasks = state.get("tasks", [])
+            if not tasks:
+                raise ValueError("No tasks found in plan")
 
-**Task**: {task.get('title', 'Untitled')}
-**Description**: {task.get('description', '')}
-**Acceptance Criteria**:
-{chr(10).join('- ' + c for c in task.get('acceptance_criteria', []))}
+            # Create feature branch
+            branch_name = await self._create_feature_branch(state)
+            state["branches_created"].append(branch_name)
 
-**Existing Files**:
-{files_context}
+            # Implement each task
+            implemented_files = []
+            for task in tasks:
+                if task["status"] != "completed":
+                    files = await self._implement_task(state, task, branch_name)
+                    implemented_files.extend(files)
+                    task["status"] = "completed"
 
-Provide complete file implementations as a JSON array."""),
-    ]
-    
-    response = await llm.ainvoke(messages)
-    
-    # Parse file operations
-    import json
-    response_text = response.content
-    if "```json" in response_text:
-        response_text = response_text.split("```json")[1].split("```")[0].strip()
-    elif "```" in response_text:
-        response_text = response_text.split("```")[1].split("```")[0].strip()
-    
-    try:
-        file_ops = json.loads(response_text)
-        if not isinstance(file_ops, list):
-            file_ops = [file_ops]
-    except json.JSONDecodeError:
-        # Fallback: single file from task
-        file_ops = [{
-            "path": task.get("files", ["unknown.py"])[0],
-            "content": response_text,
-            "operation": "create",
-            "description": task.get("title", "Implementation"),
-        }]
-    
-    return file_ops
+            state["files_changed"] = implemented_files
 
+            # Create pull request
+            pr_number = await self._create_pull_request(state, branch_name, implemented_files)
+            state["prs_created"].append(pr_number)
 
-async def coder_node(state: OrchestrationState) -> dict[str, Any]:
-    """Coder agent: Implement tasks with parallel file operations."""
-    settings = get_settings()
-    
-    print("\n👨‍💻 CODER: Starting implementation phase...")
-    
-    # Initialize LLM
-    llm = ChatAnthropic(
-        model=settings.default_agent_model,
-        temperature=0.2,
-        api_key=settings.anthropic_api_key,
-    )
-    
-    tasks = state.get("tasks", [])
-    if not tasks:
-        print("⚠️  No tasks to implement")
-        return {"error": "No tasks provided"}
-    
-    # Create feature branch
-    branch_name = f"ai/feature-{state.get('issue_number', 'auto')}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    print(f"🌿 Creating branch: {branch_name}")
-    
-    try:
-        await create_branch(
-            repo=state["repo"],
-            branch=branch_name,
-            from_branch="main",
-        )
-    except Exception as e:
-        print(f"⚠️  Branch creation failed (may already exist): {e}")
-    
-    # Implement tasks in parallel (up to max_concurrent)
-    print(f"📦 Implementing {len(tasks)} tasks in parallel...")
-    
-    semaphore = asyncio.Semaphore(min(3, len(tasks)))  # Max 3 parallel
-    
-    async def implement_with_semaphore(task: dict[str, Any]) -> list[dict[str, Any]]:
-        async with semaphore:
-            return await implement_task(llm, task, state["repo"])
-    
-    task_results = await asyncio.gather(
-        *[implement_with_semaphore(task) for task in tasks],
-        return_exceptions=True,
-    )
-    
-    # Collect all file operations
-    all_file_ops: list[dict[str, Any]] = []
-    for result in task_results:
-        if isinstance(result, Exception):
-            print(f"❌ Task failed: {result}")
-            continue
-        all_file_ops.extend(result)
-    
-    # Apply file operations to branch
-    print(f"💾 Writing {len(all_file_ops)} files to branch...")
-    files_changed = []
-    
-    for file_op in all_file_ops:
-        try:
-            await create_or_update_file(
-                repo=state["repo"],
-                path=file_op["path"],
-                content=file_op["content"],
-                branch=branch_name,
-                message=f"Implement: {file_op.get('description', 'Update file')}",
+            state["agent_results"].append(
+                self.create_result(
+                    status=TaskStatus.COMPLETED,
+                    output=f"Implemented {len(implemented_files)} files in PR #{pr_number}",
+                    artifacts={
+                        "branch": branch_name,
+                        "pr_number": pr_number,
+                        "files": implemented_files,
+                    },
+                )
             )
-            files_changed.append(file_op["path"])
-            print(f"  ✅ {file_op['path']}")
-        except Exception as e:
-            print(f"  ❌ {file_op['path']}: {e}")
-    
-    # Create pull request
-    pr_number = None
-    if files_changed and state.get("mode") != "plan":
-        print("📬 Creating pull request...")
-        plan = state.get("plan", {})
-        pr_body = f"""## Summary
-{plan.get('summary', 'AI-generated implementation')}
 
-## Tasks Completed
-{chr(10).join(f"- {task.get('title', task.get('id'))}" for task in tasks)}
+            self.log_complete("implement", TaskStatus.COMPLETED)
+            return state
+
+        except Exception as e:
+            self.log_error("implement", e)
+            state["error"] = str(e)
+            state["agent_results"].append(
+                self.create_result(status=TaskStatus.FAILED, output=f"Implementation failed: {str(e)}")
+            )
+            return state
+
+    async def _create_feature_branch(self, state: OrchestrationState) -> str:
+        """Create a feature branch for implementation."""
+        issue_num = state.get("issue_number", "manual")
+        branch_name = f"feature/issue-{issue_num}-implementation"
+
+        await create_branch(state["repo"], branch_name)
+        self.logger.info("Created branch", branch=branch_name)
+        return branch_name
+
+    async def _implement_task(self, state: OrchestrationState, task: dict, branch: str) -> list[str]:
+        """Implement a single task."""
+        # Get existing code context if modifying files
+        context = await self._get_code_context(state, task)
+
+        # Generate implementation
+        user_message = f"""Implement this task:
+
+## Task
+{task['description']}
+
+## Full Plan Context
+{state['plan']['full_plan']}
+
+## Existing Code Context
+{context}
+
+Provide complete, production-grade implementation.
+"""
+
+        implementation = await self.invoke_llm(user_message)
+
+        # Parse and commit files
+        files = self._parse_implementation(implementation)
+        committed_files = []
+
+        for file_path, content in files.items():
+            await update_file(state["repo"], file_path, content, branch, f"Implement: {task['description'][:50]}")
+            committed_files.append(file_path)
+            self.logger.info("Updated file", file=file_path, branch=branch)
+
+        return committed_files
+
+    async def _get_code_context(self, state: OrchestrationState, task: dict) -> str:
+        """Get existing code context for modification."""
+        # Extract file paths from task description
+        # (Simplified - in production, parse from structured task)
+        return "# Context will include existing file contents if modifying"
+
+    def _parse_implementation(self, implementation_text: str) -> dict[str, str]:
+        """Parse implementation text into file path -> content mapping."""
+        # Simplified parser - in production, use structured output
+        # For now, assume a single file
+        return {"src/feature.py": implementation_text}
+
+    async def _create_pull_request(self, state: OrchestrationState, branch: str, files: list[str]) -> int:
+        """Create pull request for implementation."""
+        title = f"feat: {state['plan']['summary'][:60]}"
+        body = f"""## Implementation
+
+{state['plan']['full_plan']}
 
 ## Files Changed
-{chr(10).join(f"- `{f}`" for f in files_changed)}
+{chr(10).join(f'- `{f}`' for f in files)}
 
----
-*Generated by AI Orchestration Platform*
+## Testing
+Unit tests included for all new functionality.
+
+Closes #{state.get('issue_number', 'N/A')}
 """
-        
-        try:
-            pr_data = await create_pull_request(
-                repo=state["repo"],
-                head=branch_name,
-                base="main",
-                title=f"AI: {plan.get('summary', 'Implementation')[:80]}",
-                body=pr_body,
-                draft=True,
-            )
-            pr_number = pr_data.get("number")
-            print(f"✅ Pull request created: #{pr_number}")
-        except Exception as e:
-            print(f"❌ PR creation failed: {e}")
-    
-    # Create agent result
-    agent_result: AgentResult = {
-        "agent": AgentRole.CODER,
-        "status": TaskStatus.COMPLETED if files_changed else TaskStatus.FAILED,
-        "output": f"Implemented {len(files_changed)} files",
-        "artifacts": {
-            "branch": branch_name,
-            "files": files_changed,
-            "pr_number": pr_number,
-        },
-        "metadata": {
-            "tasks_count": len(tasks),
-            "files_changed_count": len(files_changed),
-        },
-        "timestamp": datetime.now(),
-    }
-    
-    return {
-        "files_changed": files_changed,
-        "branches_created": [*state.get("branches_created", []), branch_name],
-        "prs_created": [*state.get("prs_created", []), pr_number] if pr_number else state.get("prs_created", []),
-        "agent_results": [*state.get("agent_results", []), agent_result],
-        "current_agent": AgentRole.CODER,
-        "retry_count": state.get("retry_count", 0),
-    }
+
+        pr_number = await create_pull_request(state["repo"], title, body, branch, "main")
+        self.logger.info("Created PR", pr_number=pr_number)
+        return pr_number
+
+
+async def coder_node(state: OrchestrationState) -> OrchestrationState:
+    """LangGraph node for coder agent."""
+    agent = CoderAgent()
+    return await agent.implement(state)

@@ -1,64 +1,54 @@
-# Project-specific configurations
+# Project Configuration
+# Map target repositories and their specific settings
 
 projects:
-  default:
-    branch: main
-    specs_dir: docs/specs
-    agents:
-      - planner
-      - coder
-      - tester
-      - reviewer
-    auto_merge: false
-    require_review: true
-
   vitaflow:
-    repo: yufr007/vitaflow
-    branch: main
-    specs_dir: docs/specs
-    agents:
+    repo: "yufr007/vitaflow"
+    branch: "main"
+    specs_dir: "docs/specs"
+    enabled_agents:
       - planner
       - coder
       - tester
       - reviewer
-    auto_merge: false
-    require_review: true
-    environments:
-      - development
-      - staging
-      - production
-
+    settings:
+      min_test_coverage: 85
+      require_review: true
+      auto_merge: false
+    labels:
+      - "ai-generated"
+      - "needs-review"
+  
   autom8:
-    repo: yufr007/autom8
-    branch: develop
-    specs_dir: specs
-    agents:
+    repo: "yufr007/autom8"
+    branch: "develop"
+    specs_dir: "specs"
+    enabled_agents:
       - planner
       - coder
       - devops
       - security
       - tester
       - reviewer
-    auto_merge: false
-    require_review: true
-    environments:
-      - dev
-      - prod
-
-# Environment-specific settings
-environments:
-  development:
-    database: sqlite
-    log_level: DEBUG
-    enable_tracing: true
-
-  staging:
-    database: postgresql
-    log_level: INFO
-    enable_tracing: true
-
-  production:
-    database: postgresql
-    log_level: WARNING
-    enable_tracing: false
-    require_approval: true
+    settings:
+      min_test_coverage: 90
+      require_review: true
+      require_security_scan: true
+      auto_merge: false
+    labels:
+      - "ai-orchestration"
+      - "automated"
+  
+  # Add more projects as needed
+  default:
+    branch: "main"
+    specs_dir: "docs"
+    enabled_agents:
+      - planner
+      - coder
+      - tester
+      - reviewer
+    settings:
+      min_test_coverage: 80
+      require_review: true
+      auto_merge: false

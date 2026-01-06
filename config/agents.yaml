@@ -1,61 +1,65 @@
-# Agent configuration
+# Agent Configuration
+# Customize agent behavior, models, and tool access
 
 agents:
   planner:
-    model: claude-3-5-sonnet-20241022
+    name: "Technical Lead & Planner"
+    model: "claude-3-5-sonnet-20241022"
     temperature: 0.3
     max_tokens: 4000
     tools:
       - perplexity_research
-      - github_issues
-      - github_search
+      - github_get_issue
+      - github_get_pr
     max_iterations: 3
-    timeout_seconds: 120
-
+    description: "Researches requirements and creates execution plans"
+  
   coder:
-    model: claude-3-5-sonnet-20241022
+    name: "Staff Engineer"
+    model: "claude-3-5-sonnet-20241022"
     temperature: 0.2
     max_tokens: 8000
     parallelism: 3
     tools:
-      - github_files
-      - github_branches
-      - github_pr
-    max_files_per_pr: 10
-    timeout_seconds: 300
-
+      - github_get_file
+      - github_create_file
+      - github_update_file
+      - github_create_branch
+      - github_create_pr
+    max_files_per_pr: 15
+    description: "Implements features with parallel file operations"
+  
   tester:
-    model: claude-3-5-sonnet-20241022
+    name: "QA Engineer"
+    model: "claude-3-5-sonnet-20241022"
     temperature: 0.2
     max_tokens: 6000
     tools:
-      - github_files
-      - test_runner
-    coverage_threshold: 80
-    timeout_seconds: 180
-
+      - github_get_file
+      - pytest_run
+    min_coverage: 80
+    description: "Generates and executes comprehensive tests"
+  
   reviewer:
-    model: claude-3-5-sonnet-20241022
-    temperature: 0.2
+    name: "Senior Code Reviewer"
+    model: "claude-3-5-sonnet-20241022"
+    temperature: 0.3
     max_tokens: 6000
     tools:
-      - github_pr
-      - github_reviews
+      - github_get_pr
+      - github_add_review
+      - github_add_comment
     quality_gates:
-      - security_check
-      - performance_check
-      - style_check
-    timeout_seconds: 120
+      - no_secrets
+      - no_hardcoded_values
+      - proper_error_handling
+      - documentation_present
+    description: "Reviews code quality and enforces standards"
 
-# Quality thresholds
-quality:
-  min_test_coverage: 80
-  max_complexity: 10
-  max_function_length: 50
-  max_file_length: 500
-
-# Rate limiting
-rate_limits:
-  perplexity_calls_per_hour: 100
-  github_api_calls_per_hour: 5000
-  llm_calls_per_minute: 50
+# Global settings
+global:
+  max_retries: 3
+  retry_delay_seconds: 5
+  timeout_seconds: 600
+  enable_tracing: true
+  log_level: "INFO"

@@ -1,4 +1,4 @@
-name: Deploy
+name: Deploy to Azure
 
 on:
   push:
@@ -8,56 +8,45 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy-staging:
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment: staging
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/ai-orchestration:staging
-            ${{ secrets.DOCKER_USERNAME }}/ai-orchestration:${{ github.sha }}
-
-      - name: Deploy to Azure (Staging)
-        run: |
-          echo "Deploy to Azure Container Instances or App Service"
-          # az container create or az webapp deployment ...
-
-  deploy-production:
-    if: startsWith(github.ref, 'refs/tags/v')
+  deploy:
     runs-on: ubuntu-latest
     environment: production
+    
     steps:
       - uses: actions/checkout@v4
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
+      
+      - name: Azure Login
+        uses: azure/login@v2
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/ai-orchestration:latest
-            ${{ secrets.DOCKER_USERNAME }}/ai-orchestration:${{ github.ref_name }}
-
-      - name: Deploy to Azure (Production)
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      
+      - name: Build and push to ACR
         run: |
-          echo "Deploy to production"
-          # Production deployment commands
+          az acr build \
+            --registry ${{ secrets.ACR_NAME }} \
+            --image ai-orchestration:${{ github.sha }} \
+            --image ai-orchestration:latest \
+            --file Dockerfile \
+            .
+      
+      - name: Deploy to Container Apps
+        run: |
+          az containerapp update \
+            --name ${{ secrets.APP_NAME }} \
+            --resource-group ${{ secrets.RESOURCE_GROUP }} \
+            --image ${{ secrets.ACR_NAME }}.azurecr.io/ai-orchestration:${{ github.sha }}
+      
+      - name: Verify deployment
+        run: |
+          URL=$(az containerapp show \
+            --name ${{ secrets.APP_NAME }} \
+            --resource-group ${{ secrets.RESOURCE_GROUP }} \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          
+          echo "Deployed to: https://$URL"
+          
+          # Wait for deployment
+          sleep 30
+          
+          # Health check
+          curl -f https://$URL/health || exit 1

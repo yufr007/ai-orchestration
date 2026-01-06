@@ -1,1 +1,1 @@
-"""Test suite for AI Orchestration Platform."""
+"""Test suite for AI orchestration platform."""

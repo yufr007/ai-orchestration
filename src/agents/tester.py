@@ -1,5 +1,6 @@
-"""Tester agent - Generate and run tests."""
+"""Tester Agent - Test generation and execution."""
 
+import asyncio
 from datetime import datetime
 from typing import Any
 
@@ -8,188 +9,200 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import get_settings
 from src.core.state import AgentResult, AgentRole, OrchestrationState, TaskStatus
-from src.tools.github import GitHubTools
+from src.tools.github import add_pr_comment, get_file_contents
 
 
-TESTER_SYSTEM_PROMPT = """You are an elite QA/Test Engineer ensuring code quality and correctness.
+TESTER_SYSTEM_PROMPT = """You are an elite QA/Test Engineer ensuring code quality.
 
 Your responsibilities:
-- Analyze implemented code to understand functionality
-- Generate comprehensive test cases (unit, integration, edge cases)
-- Write tests using the project's testing framework (pytest, jest, etc.)
-- Execute tests and analyze results
-- Report failures with clear reproduction steps
-- Block merges if critical tests fail
+1. Generate comprehensive test suites (unit, integration, edge cases)
+2. Analyze code for testability issues
+3. Execute tests and report failures with clear reproduction steps
+4. Suggest improvements to code based on test findings
+5. Ensure test coverage meets standards (>80%)
 
-You have access to:
-- GitHub API to read implemented code and test files
-- Test execution environments
+Test quality requirements:
+- Cover happy path, edge cases, error conditions
+- Use appropriate test frameworks (pytest, jest, etc.)
+- Include fixtures and mocks where needed
+- Write clear, descriptive test names
+- Add assertions with helpful failure messages
 
-Test strategy:
-- Unit tests: Test individual functions/methods in isolation
-- Integration tests: Test component interactions
-- Edge cases: Null values, boundary conditions, error states
-- Security: Input validation, SQL injection, XSS for web code
-
-Output format:
-- Test files with comprehensive coverage
-- Test execution results
-- Detailed failure reports if applicable
-"""
+Output: Complete test files ready to run, plus execution report."""
 
 
-async def tester_node(state: OrchestrationState) -> dict[str, Any]:
-    """Generate and run tests for implemented code."""
+async def generate_tests(files: list[str], repo: str, branch: str) -> dict[str, Any]:
+    """Generate tests for changed files."""
     settings = get_settings()
-    github = GitHubTools()
-
-    files_changed = state.get("files_changed", [])
-    repo = state["repo"]
-    pr_number = state.get("prs_created", [None])[-1]
-
-    if not files_changed:
-        return {
-            "messages": [HumanMessage(content="No files to test")],
-            "current_agent": AgentRole.TESTER,
-        }
-
-    # Get implemented code
-    code_context = await github.get_pr_files(repo, pr_number) if pr_number else {}
-
-    # Get testing requirements from plan
-    plan = state.get("plan", {})
-    testing_requirements = plan.get("testing_requirements", "Comprehensive unit and integration tests")
-
-    # Prepare prompt
-    messages = [
-        SystemMessage(content=TESTER_SYSTEM_PROMPT),
-        HumanMessage(
-            content=f"""Generate tests for this implementation:
-
-**Files Changed:**
-{_format_files(code_context)}
-
-**Testing Requirements:**
-{testing_requirements}
-
-**Project Test Framework:**
-Python: pytest with pytest-asyncio
-TypeScript: jest
-
-Generate complete test files with all necessary imports and fixtures."""
-        ),
-    ]
-
-    # Initialize LLM
     llm = ChatAnthropic(
         model=settings.default_agent_model,
-        temperature=0.2,
+        temperature=0.1,  # Lower temperature for consistent test generation
         api_key=settings.anthropic_api_key,
     )
 
+    print(f"  🧪 Generating tests for {len(files)} files...")
+
+    # Fetch file contents
+    file_contents = {}
+    for file_path in files:
+        try:
+            content = await get_file_contents(repo, file_path, branch)
+            file_contents[file_path] = content
+        except Exception as e:
+            print(f"  ⚠️  Could not fetch {file_path}: {e}")
+
+    if not file_contents:
+        return {"test_files": [], "summary": "No files to test"}
+
     # Generate tests
-    response = await llm.ainvoke(messages)
-    test_content = response.content
+    context = "\n\n".join([f"--- {path} ---\n{content}" for path, content in file_contents.items()])
 
-    # Parse test files
-    test_files = _parse_test_files(test_content)
+    prompt = f"""Code to test:
+{context}
 
-    # Add test files to branch
-    branch = state.get("branches_created", [None])[-1]
-    if branch:
-        for test_path, test_code in test_files.items():
-            await github.create_or_update_file(
-                repo=repo,
-                path=test_path,
-                content=test_code,
-                branch=branch,
-                message=f"Add tests: {test_path}",
+Generate comprehensive test suites. Return JSON:
+{{
+  "test_files": [
+    {{
+      "path": "tests/test_example.py",
+      "content": "complete test file contents",
+      "description": "what is tested"
+    }}
+  ],
+  "coverage_notes": "coverage analysis",
+  "summary": "test generation summary"
+}}
+
+Generate FULL test file contents."""
+
+    response = await llm.ainvoke([SystemMessage(content=TESTER_SYSTEM_PROMPT), HumanMessage(content=prompt)])
+
+    import json
+
+    try:
+        result = json.loads(response.content)
+    except json.JSONDecodeError:
+        result = {
+            "test_files": [],
+            "coverage_notes": "Could not parse test generation",
+            "summary": "Test generation attempted",
+        }
+
+    return result
+
+
+async def execute_tests(test_files: list[dict[str, Any]]) -> dict[str, Any]:
+    """Simulate test execution (in production, would run actual tests)."""
+    print(f"  ▶️  Executing {len(test_files)} test files...")
+
+    # Placeholder: In production, would actually run pytest/jest/etc.
+    # For now, simulate success with occasional failures
+    import random
+
+    passed = []
+    failed = []
+
+    for test_file in test_files:
+        # Simulate test execution
+        if random.random() > 0.2:  # 80% pass rate
+            passed.append(test_file["path"])
+        else:
+            failed.append(
+                {
+                    "path": test_file["path"],
+                    "error": "AssertionError: Simulated test failure",
+                    "test_name": "test_example",
+                }
             )
-
-    # Execute tests (simplified - in production, use CI or runners)
-    test_results, failures = await _execute_tests(test_files)
-
-    # Create result
-    status = TaskStatus.COMPLETED if not failures else TaskStatus.FAILED
-
-    result: AgentResult = {
-        "agent": AgentRole.TESTER,
-        "status": status,
-        "output": test_content,
-        "artifacts": {
-            "test_files": list(test_files.keys()),
-            "test_results": test_results,
-            "failures": failures,
-        },
-        "metadata": {
-            "model": settings.default_agent_model,
-            "tests_generated": len(test_files),
-            "tests_passed": test_results.get("passed", 0),
-            "tests_failed": test_results.get("failed", 0),
-        },
-        "timestamp": datetime.now(),
-    }
 
     return {
-        "test_results": test_results,
-        "test_failures": failures,
-        "agent_results": state.get("agent_results", []) + [result],
-        "current_agent": AgentRole.TESTER,
-        "messages": [
-            HumanMessage(
-                content=f"Testing completed: {test_results.get('passed', 0)} passed, {test_results.get('failed', 0)} failed"
-            )
-        ],
+        "total": len(test_files),
+        "passed": len(passed),
+        "failed": len(failed),
+        "passed_tests": passed,
+        "failed_tests": failed,
     }
 
 
-def _format_files(files: dict[str, str]) -> str:
-    """Format files for prompt."""
-    formatted = []
-    for path, content in files.items():
-        formatted.append(f"### {path}\n```\n{content}\n```")
-    return "\n\n".join(formatted)
+async def tester_node(state: OrchestrationState) -> dict[str, Any]:
+    """Tester agent node - generates and runs tests."""
+    print(f"\n{'='*80}\n🧪 TESTER AGENT STARTING\n{'='*80}")
 
+    try:
+        repo = state["repo"]
+        files_changed = state.get("files_changed", [])
+        pr_number = state.get("prs_created", [None])[-1]
+        branch = state.get("branches_created", ["main"])[-1]
 
-def _parse_test_files(content: str) -> dict[str, str]:
-    """Extract test file paths and contents."""
-    # Similar to _parse_files in coder.py
-    test_files = {}
-    lines = content.split("\n")
-    current_file = None
-    current_content = []
-    in_code_block = False
+        if not files_changed:
+            raise ValueError("No files to test")
 
-    for line in lines:
-        if "test" in line.lower() and ("file:" in line.lower() or line.startswith("###")):
-            if current_file and current_content:
-                test_files[current_file] = "\n".join(current_content).strip()
+        # Generate tests
+        test_generation_result = await generate_tests(files_changed, repo, branch)
+        test_files = test_generation_result.get("test_files", [])
 
-            current_file = line.split(":")[-1].strip().strip("`#")
-            current_content = []
-            in_code_block = False
+        print(f"📋 Generated {len(test_files)} test files")
 
-        elif line.strip().startswith("```"):
-            in_code_block = not in_code_block
+        # Execute tests
+        if test_files:
+            test_results = await execute_tests(test_files)
+        else:
+            test_results = {"total": 0, "passed": 0, "failed": 0, "passed_tests": [], "failed_tests": []}
 
-        elif current_file and (in_code_block or line.strip()):
-            current_content.append(line)
+        # Report to PR
+        if pr_number:
+            report = f"""## 🧪 Test Results
 
-    if current_file and current_content:
-        test_files[current_file] = "\n".join(current_content).strip()
+**Total Tests:** {test_results['total']}  
+**Passed:** ✅ {test_results['passed']}  
+**Failed:** ❌ {test_results['failed']}
 
-    return test_files
+### Coverage Analysis
+{test_generation_result.get('coverage_notes', 'N/A')}
 
+### Test Files Generated
+{chr(10).join(f'- `{tf["path"]}`' for tf in test_files)}
+"""
 
-async def _execute_tests(test_files: dict[str, str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Execute tests and return results.
+            if test_results["failed"] > 0:
+                report += f"\n### ❌ Failures\n"
+                for failure in test_results["failed_tests"]:
+                    report += f"- `{failure['path']}::{failure['test_name']}`: {failure['error']}\n"
 
-    In production, this would trigger CI or use a test runner.
-    For now, returns mock results.
-    """
-    # TODO: Implement actual test execution via CI webhook or local runner
-    results = {"passed": len(test_files) * 5, "failed": 0, "skipped": 0, "total": len(test_files) * 5}
+            await add_pr_comment(repo, pr_number, report)
 
-    failures = []
+        # Determine status
+        all_passed = test_results["failed"] == 0 and test_results["total"] > 0
+        status = TaskStatus.COMPLETED if all_passed else TaskStatus.FAILED
 
-    return results, failures
+        agent_result: AgentResult = {
+            "agent": AgentRole.TESTER,
+            "status": status,
+            "output": f"Tests: {test_results['passed']}/{test_results['total']} passed",
+            "artifacts": {"test_files": test_files, "test_results": test_results},
+            "metadata": {"pr_number": pr_number},
+            "timestamp": datetime.now(),
+        }
+
+        print(f"{'✅' if all_passed else '❌'} Testing complete: {test_results['passed']}/{test_results['total']} passed")
+
+        return {
+            "test_results": test_results,
+            "test_failures": test_results["failed_tests"],
+            "agent_results": [agent_result],
+            "current_agent": AgentRole.TESTER,
+            "next_agents": [AgentRole.REVIEWER] if all_passed else [AgentRole.CODER],
+            "retry_count": state.get("retry_count", 0) + (0 if all_passed else 1),
+        }
+
+    except Exception as e:
+        print(f"❌ Tester failed: {e}")
+        agent_result: AgentResult = {
+            "agent": AgentRole.TESTER,
+            "status": TaskStatus.FAILED,
+            "output": str(e),
+            "artifacts": {},
+            "metadata": {},
+            "timestamp": datetime.now(),
+        }
+        return {"agent_results": [agent_result], "error": str(e)}

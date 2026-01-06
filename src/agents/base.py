@@ -6,116 +6,78 @@ from typing import Any
 
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import get_settings
-from src.core.state import OrchestrationState, AgentRole, AgentResult, TaskStatus
-import structlog
-
-logger = structlog.get_logger()
+from src.core.state import AgentRole, AgentResult, OrchestrationState, TaskStatus
+from src.utils.logging import get_logger
 
 
 class BaseAgent(ABC):
-    """Base class for all orchestration agents."""
+    """Base class for all agents in the orchestration."""
 
-    def __init__(self, role: AgentRole, model: str | None = None, temperature: float | None = None):
+    def __init__(self, role: AgentRole, system_prompt: str):
         self.role = role
+        self.system_prompt = system_prompt
         self.settings = get_settings()
-        self.model_name = model or self.settings.default_agent_model
-        self.temperature = temperature if temperature is not None else self.settings.default_temperature
+        self.logger = get_logger(f"agent.{role.value}")
         self.llm = self._create_llm()
-        self.logger = logger.bind(agent=role.value)
 
     def _create_llm(self) -> BaseChatModel:
-        """Create LLM instance based on settings."""
+        """Create the appropriate LLM based on configuration."""
         if self.settings.primary_llm_provider == "anthropic":
             return ChatAnthropic(
-                api_key=self.settings.anthropic_api_key,
-                model=self.model_name,
-                temperature=self.temperature,
-                max_tokens=4096,
+                model=self.settings.default_agent_model,
+                temperature=self.settings.default_temperature,
+                anthropic_api_key=self.settings.anthropic_api_key,
             )
         else:
             return ChatOpenAI(
-                api_key=self.settings.openai_api_key,
-                model=self.model_name,
-                temperature=self.temperature,
-                max_tokens=4096,
+                model=self.settings.default_agent_model.replace("claude", "gpt-4"),
+                temperature=self.settings.default_temperature,
+                openai_api_key=self.settings.openai_api_key,
             )
 
-    @abstractmethod
-    def get_system_prompt(self) -> str:
-        """Get the system prompt for this agent."""
-        pass
-
-    @abstractmethod
-    async def execute(self, state: OrchestrationState) -> dict[str, Any]:
-        """Execute the agent's task."""
-        pass
-
-    async def invoke(self, state: OrchestrationState) -> dict[str, Any]:
-        """Main entry point for agent execution."""
-        self.logger.info(f"Starting {self.role.value} agent", repo=state.get("repo"))
-        started_at = datetime.utcnow()
+    async def invoke(self, state: OrchestrationState) -> AgentResult:
+        """Execute the agent and return a result."""
+        self.logger.info(f"Starting {self.role.value} agent")
+        start_time = datetime.now()
 
         try:
-            result = await self.execute(state)
+            output, artifacts = await self.execute(state)
             status = TaskStatus.COMPLETED
             error = None
-            self.logger.info(f"Completed {self.role.value} agent")
-
         except Exception as e:
-            self.logger.error(f"Error in {self.role.value} agent", error=str(e))
-            result = {"error": str(e)}
+            self.logger.error(f"{self.role.value} failed: {e}", exc_info=True)
+            output = f"Error: {str(e)}"
+            artifacts = {}
             status = TaskStatus.FAILED
             error = str(e)
 
-        # Create agent result
-        agent_result = AgentResult(
-            agent=self.role,
-            status=status,
-            output=result.get("output", ""),
-            artifacts=result.get("artifacts", {}),
-            metadata=result.get("metadata", {}),
-            timestamp=datetime.utcnow(),
-        )
-
-        # Update state
-        updates = {
-            "current_agent": self.role,
-            "agent_results": state.get("agent_results", []) + [agent_result],
+        result: AgentResult = {
+            "agent": self.role,
+            "status": status,
+            "output": output,
+            "artifacts": artifacts,
+            "metadata": {
+                "duration_seconds": (datetime.now() - start_time).total_seconds(),
+                "error": error,
+            },
+            "timestamp": datetime.now(),
         }
 
-        if error:
-            updates["error"] = error
+        self.logger.info(f"{self.role.value} completed with status: {status.value}")
+        return result
 
-        updates.update(result)
-        return updates
+    @abstractmethod
+    async def execute(self, state: OrchestrationState) -> tuple[str, dict[str, Any]]:
+        """Execute agent logic. Returns (output_message, artifacts_dict)."""
+        pass
 
-    async def _call_llm(
-        self, system_prompt: str, user_message: str, context: dict[str, Any] | None = None
-    ) -> str:
-        """Call LLM with system and user messages."""
-        messages = [
-            SystemMessage(content=system_prompt),
+    def _format_messages(self, user_message: str) -> list:
+        """Format system and user messages for LLM."""
+        return [
+            SystemMessage(content=self.system_prompt),
             HumanMessage(content=user_message),
         ]
-
-        if context:
-            context_msg = f"\n\nAdditional Context:\n{self._format_context(context)}"
-            messages[-1].content += context_msg
-
-        response = await self.llm.ainvoke(messages)
-        return response.content
-
-    def _format_context(self, context: dict[str, Any]) -> str:
-        """Format context dictionary for LLM."""
-        lines = []
-        for key, value in context.items():
-            if isinstance(value, (list, dict)):
-                import json
-
-                value = json.dumps(value, indent=2)
-            lines.append(f"{key}: {value}")
-        return "\n".join(lines)

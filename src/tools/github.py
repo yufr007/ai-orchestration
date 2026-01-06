@@ -1,43 +1,38 @@
-"""GitHub integration using PyGithub."""
+"""GitHub integration using GitHub API (wraps GitHub MCP tools)."""
 
 import base64
 from typing import Any
 
-from github import Github, GithubException
+import httpx
+from github import Github
+from github.GithubException import GithubException
+
 from src.config import get_settings
+
+settings = get_settings()
 
 
 class GitHubClient:
-    """Wrapper for GitHub API operations."""
+    """GitHub API client wrapper."""
 
     def __init__(self) -> None:
-        self.settings = get_settings()
-        self.client = Github(self.settings.github_token)
+        self.token = settings.github_token
+        self.owner = settings.github_owner
+        self.gh = Github(self.token)
+        self.base_url = "https://api.github.com"
 
-    def get_repo(self, repo_name: str) -> Any:
-        """Get repository object.
-        
-        Args:
-            repo_name: Repository name in format 'owner/repo'
-        
-        Returns:
-            Repository object
-        """
-        return self.client.get_repo(repo_name)
+    def _parse_repo(self, repo: str) -> tuple[str, str]:
+        """Parse repo string into owner/name."""
+        if "/" in repo:
+            owner, name = repo.split("/", 1)
+            return owner, name
+        return self.owner, repo
 
     async def get_issue(self, repo: str, issue_number: int) -> dict[str, Any]:
-        """Get issue details.
-        
-        Args:
-            repo: Repository name
-            issue_number: Issue number
-        
-        Returns:
-            Issue details
-        """
-        repo_obj = self.get_repo(repo)
-        issue = repo_obj.get_issue(issue_number)
-        
+        """Get issue details."""
+        owner, repo_name = self._parse_repo(repo)
+        repository = self.gh.get_repo(f"{owner}/{repo_name}")
+        issue = repository.get_issue(issue_number)
         return {
             "number": issue.number,
             "title": issue.title,
@@ -49,122 +44,11 @@ class GitHubClient:
             "updated_at": issue.updated_at.isoformat(),
         }
 
-    async def get_file(self, repo: str, path: str, ref: str = "main") -> str:
-        """Get file contents.
-        
-        Args:
-            repo: Repository name
-            path: File path
-            ref: Git ref (branch, tag, commit)
-        
-        Returns:
-            File contents as string
-        """
-        repo_obj = self.get_repo(repo)
-        try:
-            content = repo_obj.get_contents(path, ref=ref)
-            if isinstance(content, list):
-                raise ValueError(f"{path} is a directory, not a file")
-            return base64.b64decode(content.content).decode("utf-8")
-        except GithubException as e:
-            if e.status == 404:
-                raise FileNotFoundError(f"File not found: {path}")
-            raise
-
-    async def create_branch(self, owner: str, repo: str, branch: str, from_branch: str = "main") -> None:
-        """Create a new branch.
-        
-        Args:
-            owner: Repository owner
-            repo: Repository name
-            branch: New branch name
-            from_branch: Source branch
-        """
-        repo_obj = self.get_repo(f"{owner}/{repo}")
-        source = repo_obj.get_branch(from_branch)
-        repo_obj.create_git_ref(f"refs/heads/{branch}", source.commit.sha)
-
-    async def create_or_update_file(
-        self,
-        owner: str,
-        repo: str,
-        path: str,
-        content: str,
-        message: str,
-        branch: str,
-    ) -> None:
-        """Create or update a file.
-        
-        Args:
-            owner: Repository owner
-            repo: Repository name
-            path: File path
-            content: File content
-            message: Commit message
-            branch: Target branch
-        """
-        repo_obj = self.get_repo(f"{owner}/{repo}")
-        try:
-            # Try to get existing file
-            existing = repo_obj.get_contents(path, ref=branch)
-            if isinstance(existing, list):
-                raise ValueError(f"{path} is a directory")
-            # Update existing file
-            repo_obj.update_file(path, message, content, existing.sha, branch=branch)
-        except GithubException as e:
-            if e.status == 404:
-                # Create new file
-                repo_obj.create_file(path, message, content, branch=branch)
-            else:
-                raise
-
-    async def create_pull_request(
-        self,
-        owner: str,
-        repo: str,
-        title: str,
-        body: str,
-        head: str,
-        base: str,
-    ) -> dict[str, Any]:
-        """Create a pull request.
-        
-        Args:
-            owner: Repository owner
-            repo: Repository name
-            title: PR title
-            body: PR description
-            head: Source branch
-            base: Target branch
-        
-        Returns:
-            PR details
-        """
-        repo_obj = self.get_repo(f"{owner}/{repo}")
-        pr = repo_obj.create_pull(title=title, body=body, head=head, base=base)
-        
-        return {
-            "number": pr.number,
-            "title": pr.title,
-            "body": pr.body,
-            "state": pr.state,
-            "html_url": pr.html_url,
-        }
-
-    async def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
-        """Get pull request details.
-        
-        Args:
-            owner: Repository owner
-            repo: Repository name
-            pr_number: PR number
-        
-        Returns:
-            PR details
-        """
-        repo_obj = self.get_repo(f"{owner}/{repo}")
-        pr = repo_obj.get_pull(pr_number)
-        
+    async def get_pull_request(self, repo: str, pr_number: int) -> dict[str, Any]:
+        """Get pull request details."""
+        owner, repo_name = self._parse_repo(repo)
+        repository = self.gh.get_repo(f"{owner}/{repo_name}")
+        pr = repository.get_pull(pr_number)
         return {
             "number": pr.number,
             "title": pr.title,
@@ -172,48 +56,99 @@ class GitHubClient:
             "state": pr.state,
             "head": pr.head.ref,
             "base": pr.base.ref,
-            "html_url": pr.html_url,
             "mergeable": pr.mergeable,
+            "merged": pr.merged,
         }
 
-    async def get_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
-        """Get files changed in a PR.
-        
-        Args:
-            owner: Repository owner
-            repo: Repository name
-            pr_number: PR number
-        
-        Returns:
-            List of changed files
-        """
-        repo_obj = self.get_repo(f"{owner}/{repo}")
-        pr = repo_obj.get_pull(pr_number)
-        
-        return [
-            {
-                "filename": file.filename,
-                "status": file.status,
-                "additions": file.additions,
-                "deletions": file.deletions,
-                "changes": file.changes,
-                "patch": getattr(file, "patch", None),
-            }
-            for file in pr.get_files()
-        ]
+    async def get_file(self, repo: str, path: str, ref: str = "main") -> str:
+        """Get file contents."""
+        owner, repo_name = self._parse_repo(repo)
+        repository = self.gh.get_repo(f"{owner}/{repo_name}")
+        try:
+            contents = repository.get_contents(path, ref=ref)
+            if isinstance(contents, list):
+                raise ValueError(f"{path} is a directory, not a file")
+            return base64.b64decode(contents.content).decode("utf-8")
+        except GithubException as e:
+            if e.status == 404:
+                raise FileNotFoundError(f"File not found: {path}")
+            raise
 
-    async def add_pull_request_comment(self, owner: str, repo: str, pr_number: int, body: str) -> None:
-        """Add a comment to a PR.
-        
+    async def create_branch(self, repo: str, branch_name: str, from_branch: str = "main") -> None:
+        """Create a new branch."""
+        owner, repo_name = self._parse_repo(repo)
+        repository = self.gh.get_repo(f"{owner}/{repo_name}")
+        source = repository.get_branch(from_branch)
+        repository.create_git_ref(ref=f"refs/heads/{branch_name}", sha=source.commit.sha)
+
+    async def create_or_update_file(
+        self, repo: str, path: str, content: str, branch: str, message: str
+    ) -> None:
+        """Create or update a file."""
+        owner, repo_name = self._parse_repo(repo)
+        repository = self.gh.get_repo(f"{owner}/{repo_name}")
+
+        try:
+            # Try to get existing file
+            contents = repository.get_contents(path, ref=branch)
+            if isinstance(contents, list):
+                raise ValueError(f"{path} is a directory")
+            # Update existing file
+            repository.update_file(
+                path=path, message=message, content=content, sha=contents.sha, branch=branch
+            )
+        except GithubException as e:
+            if e.status == 404:
+                # Create new file
+                repository.create_file(path=path, message=message, content=content, branch=branch)
+            else:
+                raise
+
+    async def create_pull_request(
+        self, repo: str, head: str, base: str, title: str, body: str
+    ) -> int:
+        """Create a pull request."""
+        owner, repo_name = self._parse_repo(repo)
+        repository = self.gh.get_repo(f"{owner}/{repo_name}")
+        pr = repository.create_pull(title=title, body=body, head=head, base=base)
+        return pr.number
+
+    async def add_pr_comment(self, repo: str, pr_number: int, comment: str) -> None:
+        """Add a comment to a pull request."""
+        owner, repo_name = self._parse_repo(repo)
+        repository = self.gh.get_repo(f"{owner}/{repo_name}")
+        pr = repository.get_pull(pr_number)
+        pr.create_issue_comment(comment)
+
+    async def add_pr_review(
+        self, repo: str, pr_number: int, body: str, event: str = "COMMENT"
+    ) -> None:
+        """Add a review to a pull request.
+
         Args:
-            owner: Repository owner
             repo: Repository name
-            pr_number: PR number
-            body: Comment text
+            pr_number: Pull request number
+            body: Review comment body
+            event: Review event type (APPROVE, REQUEST_CHANGES, COMMENT)
         """
-        repo_obj = self.get_repo(f"{owner}/{repo}")
-        pr = repo_obj.get_pull(pr_number)
-        pr.create_issue_comment(body)
+        owner, repo_name = self._parse_repo(repo)
+        repository = self.gh.get_repo(f"{owner}/{repo_name}")
+        pr = repository.get_pull(pr_number)
+        pr.create_review(body=body, event=event)
+
+    async def get_pr_diff(self, repo: str, pr_number: int) -> str:
+        """Get pull request diff."""
+        owner, repo_name = self._parse_repo(repo)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self.base_url}/repos/{owner}/{repo_name}/pulls/{pr_number}",
+                headers={
+                    "Authorization": f"token {self.token}",
+                    "Accept": "application/vnd.github.v3.diff",
+                },
+            )
+            response.raise_for_status()
+            return response.text
 
 
 # Singleton instance
@@ -235,47 +170,51 @@ async def get_issue_details(repo: str, issue_number: int) -> dict[str, Any]:
     return await client.get_issue(repo, issue_number)
 
 
+async def get_pr_details(repo: str, pr_number: int) -> dict[str, Any]:
+    """Get pull request details."""
+    client = get_github_client()
+    return await client.get_pull_request(repo, pr_number)
+
+
 async def get_file_contents(repo: str, path: str, ref: str = "main") -> str:
-    """Get file contents."""
+    """Get file contents from repository."""
     client = get_github_client()
     return await client.get_file(repo, path, ref)
 
 
-async def create_branch(owner: str, repo: str, branch: str, from_branch: str = "main") -> None:
+async def create_branch(repo: str, branch_name: str, from_branch: str = "main") -> None:
     """Create a new branch."""
     client = get_github_client()
-    await client.create_branch(owner, repo, branch, from_branch)
+    await client.create_branch(repo, branch_name, from_branch)
 
 
 async def create_or_update_file(
-    owner: str, repo: str, path: str, content: str, message: str, branch: str
+    repo: str, path: str, content: str, branch: str, message: str
 ) -> None:
-    """Create or update a file."""
+    """Create or update a file in the repository."""
     client = get_github_client()
-    await client.create_or_update_file(owner, repo, path, content, message, branch)
+    await client.create_or_update_file(repo, path, content, branch, message)
 
 
-async def create_pull_request(
-    owner: str, repo: str, title: str, body: str, head: str, base: str
-) -> dict[str, Any]:
+async def create_pull_request(repo: str, head: str, base: str, title: str, body: str) -> int:
     """Create a pull request."""
     client = get_github_client()
-    return await client.create_pull_request(owner, repo, title, body, head, base)
+    return await client.create_pull_request(repo, head, base, title, body)
 
 
-async def get_pr_details(owner: str, repo: str, pr_number: int) -> dict[str, Any]:
-    """Get PR details."""
+async def add_pr_comment(repo: str, pr_number: int, comment: str) -> None:
+    """Add a comment to a pull request."""
     client = get_github_client()
-    return await client.get_pull_request(owner, repo, pr_number)
+    await client.add_pr_comment(repo, pr_number, comment)
 
 
-async def get_pr_files(owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
-    """Get files changed in a PR."""
+async def add_pr_review(repo: str, pr_number: int, body: str, event: str = "COMMENT") -> None:
+    """Add a review to a pull request."""
     client = get_github_client()
-    return await client.get_pull_request_files(owner, repo, pr_number)
+    await client.add_pr_review(repo, pr_number, body, event)
 
 
-async def add_pr_comment(owner: str, repo: str, pr_number: int, body: str) -> None:
-    """Add a comment to a PR."""
+async def get_pr_diff(repo: str, pr_number: int) -> str:
+    """Get pull request diff."""
     client = get_github_client()
-    await client.add_pull_request_comment(owner, repo, pr_number, body)
+    return await client.get_pr_diff(repo, pr_number)

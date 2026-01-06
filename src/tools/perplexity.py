@@ -1,33 +1,34 @@
-"""Perplexity MCP integration for research and knowledge gathering."""
+"""Perplexity MCP integration for research and web search."""
 
 import asyncio
 import json
-import os
 from typing import Any
 
 import httpx
+
 from src.config import get_settings
+
+settings = get_settings()
 
 
 class PerplexityMCP:
-    """Client for Perplexity MCP server."""
+    """Perplexity MCP client wrapper."""
 
     def __init__(self) -> None:
-        self.settings = get_settings()
-        self.api_key = self.settings.perplexity_api_key
-        self.model = self.settings.perplexity_model
-        self.timeout = self.settings.perplexity_timeout_ms / 1000.0
+        self.api_key = settings.perplexity_api_key
+        self.model = settings.perplexity_model
+        self.timeout = settings.perplexity_timeout_ms / 1000
         self.base_url = "https://api.perplexity.ai"
 
-    async def search(self, query: str, **kwargs: Any) -> str:
-        """Execute a search query via Perplexity API.
-        
+    async def search(self, query: str, return_citations: bool = True) -> dict[str, Any]:
+        """Execute a Perplexity search query.
+
         Args:
             query: Search query string
-            **kwargs: Additional parameters (model, temperature, etc.)
-        
+            return_citations: Include source citations
+
         Returns:
-            Search results as formatted string
+            Dictionary with answer and optional citations
         """
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(
@@ -37,71 +38,52 @@ class PerplexityMCP:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": kwargs.get("model", self.model),
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are a helpful research assistant. Provide accurate, well-sourced information.",
-                        },
-                        {"role": "user", "content": query},
-                    ],
-                    "temperature": kwargs.get("temperature", 0.2),
-                    "max_tokens": kwargs.get("max_tokens", 1000),
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": query}],
+                    "return_citations": return_citations,
+                    "return_images": False,
                 },
             )
             response.raise_for_status()
             data = response.json()
-            
-            # Extract content and citations
-            content = data["choices"][0]["message"]["content"]
-            
-            # Check for citations in response
-            citations = data.get("citations", [])
-            if citations:
-                content += "\n\nSources:\n"
-                for i, citation in enumerate(citations, 1):
-                    content += f"{i}. {citation}\n"
-            
-            return content
 
-    async def research(self, topic: str, depth: str = "standard") -> dict[str, Any]:
+            return {
+                "answer": data["choices"][0]["message"]["content"],
+                "citations": data.get("citations", []),
+                "usage": data.get("usage", {}),
+            }
+
+    async def research(self, topic: str, focus_areas: list[str] | None = None) -> str:
         """Perform deep research on a topic.
-        
+
         Args:
-            topic: Research topic
-            depth: Research depth ("quick", "standard", "deep")
-        
+            topic: Main research topic
+            focus_areas: Specific areas to focus on
+
         Returns:
-            Structured research results
+            Comprehensive research summary
         """
-        queries = []
-        
-        if depth == "quick":
-            queries = [topic]
-        elif depth == "standard":
-            queries = [
-                topic,
-                f"{topic} best practices",
-                f"{topic} common pitfalls",
-            ]
-        else:  # deep
-            queries = [
-                topic,
-                f"{topic} best practices",
-                f"{topic} common pitfalls",
-                f"{topic} implementation guide",
-                f"{topic} performance considerations",
-            ]
-        
-        results = await asyncio.gather(*[self.search(q) for q in queries])
-        
-        return {
-            "topic": topic,
-            "depth": depth,
-            "queries": queries,
-            "results": dict(zip(queries, results)),
-            "summary": results[0],  # First result as summary
-        }
+        queries = [topic]
+        if focus_areas:
+            queries.extend([f"{topic}: {area}" for area in focus_areas])
+
+        # Execute searches in parallel
+        results = await asyncio.gather(*[self.search(q) for q in queries], return_exceptions=True)
+
+        # Combine results
+        combined = []
+        for query, result in zip(queries, results):
+            if isinstance(result, Exception):
+                combined.append(f"**{query}**: Error - {result}")
+            else:
+                answer = result.get("answer", "No answer")
+                citations = result.get("citations", [])
+                citations_text = (
+                    "\n  Sources: " + ", ".join(citations[:3]) if citations else ""
+                )
+                combined.append(f"**{query}**:\n{answer}{citations_text}")
+
+        return "\n\n".join(combined)
 
 
 # Singleton instance
@@ -109,36 +91,35 @@ _perplexity_client: PerplexityMCP | None = None
 
 
 def get_perplexity_client() -> PerplexityMCP:
-    """Get or create Perplexity MCP client singleton."""
+    """Get or create Perplexity client singleton."""
     global _perplexity_client
     if _perplexity_client is None:
         _perplexity_client = PerplexityMCP()
     return _perplexity_client
 
 
-async def search_perplexity(query: str, **kwargs: Any) -> str:
-    """Convenience function to search via Perplexity.
-    
+async def perplexity_search(query: str) -> dict[str, Any]:
+    """Execute a Perplexity search.
+
     Args:
         query: Search query
-        **kwargs: Additional parameters
-    
+
     Returns:
-        Search results
+        Search results with answer and citations
     """
     client = get_perplexity_client()
-    return await client.search(query, **kwargs)
+    return await client.search(query)
 
 
-async def research_topic(topic: str, depth: str = "standard") -> dict[str, Any]:
-    """Convenience function to research a topic.
-    
+async def perplexity_research(topic: str, focus_areas: list[str] | None = None) -> str:
+    """Perform comprehensive research using Perplexity.
+
     Args:
-        topic: Research topic
-        depth: Research depth
-    
+        topic: Main research topic
+        focus_areas: Optional list of specific areas to research
+
     Returns:
-        Structured research results
+        Detailed research summary
     """
     client = get_perplexity_client()
-    return await client.research(topic, depth)
+    return await client.research(topic, focus_areas)

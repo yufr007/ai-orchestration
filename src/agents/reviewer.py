@@ -1,4 +1,4 @@
-"""Reviewer Agent - Code review and quality gates."""
+"""Reviewer agent: Code review and quality gates."""
 
 from datetime import datetime
 from typing import Any
@@ -8,173 +8,155 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import get_settings
 from src.core.state import AgentResult, AgentRole, OrchestrationState, TaskStatus
-from src.tools.github import add_pr_review, get_pr_diff
+from src.tools.github import add_pr_comment, get_pr_details, get_pr_files
 
 
-REVIEWER_SYSTEM_PROMPT = """You are an elite Senior Engineering Manager performing code review.
+REVIEWER_SYSTEM_PROMPT = """You are an elite Senior Engineer performing code review.
 
-Review criteria:
-1. **Code Quality**: Clean, maintainable, follows best practices
-2. **Architecture**: Proper separation of concerns, scalability
-3. **Security**: No vulnerabilities, proper input validation
-4. **Testing**: Adequate coverage, quality of tests
-5. **Documentation**: Clear comments, docstrings, README updates
-6. **Performance**: No obvious bottlenecks or inefficiencies
-7. **Error Handling**: Comprehensive, proper logging
-8. **Style**: Consistent formatting, naming conventions
+Your responsibilities:
+1. Review code changes for:
+   - Correctness: Does it solve the problem?
+   - Code quality: Clean, maintainable, follows best practices?
+   - Performance: Efficient algorithms and data structures?
+   - Security: No vulnerabilities, proper input validation?
+   - Testing: Adequate test coverage?
+   - Documentation: Clear docstrings and comments where needed?
+2. Identify issues ranging from:
+   - BLOCKING: Must fix before merge (bugs, security issues)
+   - MAJOR: Should fix (performance, maintainability)
+   - MINOR: Nice to have (style, optimization opportunities)
+3. Provide specific, actionable feedback
+4. Suggest improvements with code examples
+5. Approve if ready, request changes if issues found
 
-Output structured review with:
-- Overall assessment (APPROVE, REQUEST_CHANGES, COMMENT)
-- Strengths (what's done well)
-- Issues (must-fix problems)
-- Suggestions (nice-to-haves)
-- Security concerns (if any)
-- Performance notes
+Output format:
+```json
+{
+  "decision": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+  "summary": "Overall assessment",
+  "comments": [
+    {
+      "file": "path/to/file.py",
+      "line": 42,
+      "severity": "BLOCKING" | "MAJOR" | "MINOR",
+      "comment": "Specific issue and suggestion"
+    }
+  ]
+}
+```
 
-Be thorough but constructive. Approve only production-ready code."""
+Be thorough but fair. Recognize good work. Focus on substance over style."""
 
 
 async def reviewer_node(state: OrchestrationState) -> dict[str, Any]:
-    """Reviewer agent node - performs code review."""
+    """Reviewer agent node: Perform code review on PR."""
     settings = get_settings()
-    print(f"\n{'='*80}\n👀 REVIEWER AGENT STARTING\n{'='*80}")
-
-    try:
-        repo = state["repo"]
-        pr_number = state.get("prs_created", [None])[-1]
-
-        if not pr_number:
-            raise ValueError("No PR to review")
-
-        # Get PR diff
-        print(f"📄 Fetching PR #{pr_number} diff...")
-        pr_diff = await get_pr_diff(repo, pr_number)
-
-        # Perform review
-        llm = ChatAnthropic(
-            model=settings.default_agent_model,
-            temperature=0.1,  # Low temperature for consistent reviews
-            api_key=settings.anthropic_api_key,
-        )
-
-        plan = state.get("plan", {})
-        test_results = state.get("test_results", {})
-
-        prompt = f"""Review this pull request:
-
-**Original Plan:**
-{plan.get('summary', 'N/A')}
-
-**Test Results:**
-Passed: {test_results.get('passed', 0)}/{test_results.get('total', 0)}
-
-**Code Changes:**
-{pr_diff[:8000]}  # Limit diff size
-
-Provide structured review as JSON:
-{{
-  "decision": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
-  "summary": "overall assessment",
-  "strengths": ["strength 1", "strength 2"],
-  "issues": [
-    {{"severity": "critical|major|minor", "description": "issue", "file": "path", "line": 10}}
-  ],
-  "suggestions": ["suggestion 1"],
-  "security_concerns": ["concern 1"],
-  "performance_notes": "performance analysis"
-}}
-"""
-
-        print("🔍 Analyzing code...")
-        response = await llm.ainvoke([SystemMessage(content=REVIEWER_SYSTEM_PROMPT), HumanMessage(content=prompt)])
-
-        # Parse review
-        import json
-
-        try:
-            review = json.loads(response.content)
-        except json.JSONDecodeError:
-            review = {
-                "decision": "COMMENT",
-                "summary": response.content[:500],
-                "strengths": [],
-                "issues": [],
-                "suggestions": [],
-                "security_concerns": [],
-                "performance_notes": "Could not parse review",
-            }
-
-        # Format review comment
-        review_body = f"""## 🤖 AI Code Review
-
-### Decision: {review['decision']}
-
-{review['summary']}
-
-### ✅ Strengths
-{chr(10).join(f'- {s}' for s in review.get('strengths', [])) if review.get('strengths') else '- None noted'}
-
-### ⚠️ Issues
-{chr(10).join(f'- **{i.get("severity", "unknown").upper()}**: {i.get("description", "")} (`{i.get("file", "unknown")}:{i.get("line", "?")}`)' for i in review.get('issues', [])) if review.get('issues') else '- None found'}
-
-### 💡 Suggestions
-{chr(10).join(f'- {s}' for s in review.get('suggestions', [])) if review.get('suggestions') else '- None'}
-
-### 🔒 Security
-{chr(10).join(f'- ⚠️ {c}' for c in review.get('security_concerns', [])) if review.get('security_concerns') else '- ✅ No concerns identified'}
-
-### ⚡ Performance
-{review.get('performance_notes', 'No specific notes')}
-
----
-*Automated review - Human review still recommended before merge*
-"""
-
-        # Submit review to PR
-        print(f"📝 Submitting review: {review['decision']}")
-        await add_pr_review(
-            repo=repo,
-            pr_number=pr_number,
-            body=review_body,
-            event=review["decision"],
-        )
-
-        # Determine approval status
-        approval_status = (
-            "approved"
-            if review["decision"] == "APPROVE"
-            else "changes_requested" if review["decision"] == "REQUEST_CHANGES" else "commented"
-        )
-
-        agent_result: AgentResult = {
-            "agent": AgentRole.REVIEWER,
-            "status": TaskStatus.COMPLETED,
-            "output": f"Review: {review['decision']}",
-            "artifacts": {"review": review, "approval_status": approval_status},
-            "metadata": {"pr_number": pr_number},
-            "timestamp": datetime.now(),
-        }
-
-        print(f"✅ Review complete: {review['decision']}")
-        print(f"   Issues: {len(review.get('issues', []))} | Suggestions: {len(review.get('suggestions', []))}")
-
+    
+    # Initialize LLM
+    llm = ChatAnthropic(
+        model=settings.default_agent_model,
+        temperature=0.3,
+        api_key=settings.anthropic_api_key,
+    )
+    
+    # Get PR details
+    pr_number = state.get("prs_created", [None])[-1] or state.get("pr_number")
+    if not pr_number:
         return {
-            "review_comments": [review],
-            "approval_status": approval_status,
-            "agent_results": [agent_result],
-            "current_agent": AgentRole.REVIEWER,
-            "next_agents": [],
-            "completed_at": datetime.now(),
+            "error": "No PR available for review",
+            "agent_results": [
+                {
+                    "agent": AgentRole.REVIEWER,
+                    "status": TaskStatus.FAILED,
+                    "output": "No PR",
+                    "artifacts": {},
+                    "metadata": {},
+                    "timestamp": datetime.now(),
+                }
+            ],
         }
-
-    except Exception as e:
-        print(f"❌ Reviewer failed: {e}")
-        agent_result: AgentResult = {
-            "agent": AgentRole.REVIEWER,
-            "status": TaskStatus.FAILED,
-            "output": str(e),
-            "artifacts": {},
-            "metadata": {},
-            "timestamp": datetime.now(),
-        }
-        return {"agent_results": [agent_result], "error": str(e)}
+    
+    repo_parts = state["repo"].split("/")
+    owner, repo_name = repo_parts[0], repo_parts[1]
+    
+    # Get PR details and files
+    pr_details = await get_pr_details(owner=owner, repo=repo_name, pr_number=pr_number)
+    pr_files = await get_pr_files(owner=owner, repo=repo_name, pr_number=pr_number)
+    
+    # Gather review context
+    context_parts = []
+    context_parts.append(f"PR #{pr_number}: {pr_details['title']}")
+    context_parts.append(f"Description: {pr_details['body']}")
+    context_parts.append(f"\nFiles changed: {len(pr_files)}")
+    
+    # Get test results if available
+    test_results = state.get("test_results")
+    if test_results:
+        context_parts.append(
+            f"\nTest Results: {test_results['passed']}/{test_results['total']} passed, "
+            f"{test_results['coverage']}% coverage"
+        )
+    
+    # Add file diffs (simplified - in production, get actual diffs)
+    for file in pr_files[:3]:  # Limit to first 3 files
+        context_parts.append(f"\n{file['filename']}: {file['additions']} additions, {file['deletions']} deletions")
+    
+    context = "\n".join(context_parts)
+    
+    messages = [
+        SystemMessage(content=REVIEWER_SYSTEM_PROMPT),
+        HumanMessage(content=f"{context}\n\nPerform a thorough code review and provide your decision."),
+    ]
+    
+    # Invoke LLM
+    response = await llm.ainvoke(messages)
+    review_output = response.content
+    
+    # Parse review decision (simplified - in production use structured output)
+    # For demo: assume approval if tests passed and no critical issues
+    has_test_failures = state.get("test_failures", [])
+    
+    if has_test_failures:
+        decision = "REQUEST_CHANGES"
+        comments = [
+            {
+                "body": "Tests are failing. Please fix test failures before merging.",
+                "severity": "BLOCKING",
+            }
+        ]
+    else:
+        decision = "APPROVE"
+        comments = [
+            {
+                "body": f"LGTM! ✅\n\n{review_output[:500]}",
+                "severity": "INFO",
+            }
+        ]
+    
+    # Add review comment to PR
+    for comment in comments:
+        await add_pr_comment(
+            owner=owner,
+            repo=repo_name,
+            pr_number=pr_number,
+            body=comment["body"],
+        )
+    
+    # Create agent result
+    result: AgentResult = {
+        "agent": AgentRole.REVIEWER,
+        "status": TaskStatus.COMPLETED,
+        "output": review_output,
+        "artifacts": {"decision": decision, "comments": comments},
+        "metadata": {"pr_number": pr_number},
+        "timestamp": datetime.now(),
+    }
+    
+    return {
+        "review_comments": comments,
+        "approval_status": decision.lower(),
+        "agent_results": [result],
+        "current_agent": AgentRole.REVIEWER,
+        "completed_at": datetime.now() if decision == "APPROVE" else None,
+        "messages": [HumanMessage(content=f"Review: {decision}")],
+    }

@@ -1,4 +1,4 @@
-"""API server for orchestration platform."""
+"""FastAPI server for orchestration."""
 
 from .server import app
 

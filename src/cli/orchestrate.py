@@ -1,179 +1,217 @@
-"""Main CLI for orchestration operations."""
+"""Main CLI for orchestration."""
 
 import asyncio
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.table import Table
 
 from src.config import get_settings
-from src.core import create_orchestration_graph, OrchestrationState
+from src.core.graph import create_orchestration_graph
+from src.core.state import OrchestrationState
 
 app = typer.Typer(
     name="orchestrate",
-    help="AI Orchestration Platform - Elite multi-agent development team",
+    help="AI Orchestration Platform - Autonomous software development",
 )
 console = Console()
-settings = get_settings()
 
 
 @app.command()
 def run(
     repo: str = typer.Option(..., "--repo", "-r", help="Repository (owner/repo)"),
-    issue: Optional[int] = typer.Option(None, "--issue", "-i", help="Issue number to implement"),
-    pr: Optional[int] = typer.Option(None, "--pr", "-p", help="PR number to review"),
-    spec: Optional[str] = typer.Option(None, "--spec", "-s", help="Path to specification file"),
+    issue: int | None = typer.Option(None, "--issue", "-i", help="Issue number"),
+    pr: int | None = typer.Option(None, "--pr", "-p", help="PR number to review"),
+    spec: Path | None = typer.Option(None, "--spec", "-s", help="Spec file path"),
     mode: str = typer.Option(
         "autonomous",
         "--mode",
         "-m",
-        help="Execution mode: autonomous, plan, review",
+        help="Mode: autonomous, plan, review",
     ),
     trace: bool = typer.Option(False, "--trace", help="Enable LangSmith tracing"),
 ) -> None:
-    """Run orchestration workflow.
+    """Run orchestration workflow."""
+    asyncio.run(_run_async(repo, issue, pr, spec, mode, trace))
 
-    Examples:
-        # Implement an issue
-        orchestrate run --repo yufr007/vitaflow --issue 123
 
-        # Plan only
-        orchestrate run --repo yufr007/vitaflow --spec specs/feature.md --mode plan
-
-        # Review PR
-        orchestrate run --repo yufr007/vitaflow --pr 45 --mode review
-    """
-    # Validate inputs
-    if not any([issue, pr, spec]):
-        console.print("[red]Error: Must provide --issue, --pr, or --spec[/red]")
-        raise typer.Exit(1)
-
-    # Load spec content if provided
-    spec_content = None
-    if spec:
-        try:
-            with open(spec, "r") as f:
-                spec_content = f.read()
-        except FileNotFoundError:
-            console.print(f"[red]Error: Spec file not found: {spec}[/red]")
-            raise typer.Exit(1)
+async def _run_async(
+    repo: str,
+    issue: int | None,
+    pr: int | None,
+    spec: Path | None,
+    mode: str,
+    trace: bool,
+) -> None:
+    """Async implementation of run command."""
+    settings = get_settings()
 
     # Enable tracing if requested
-    if trace:
+    if trace and settings.langsmith_api_key:
         import os
 
         os.environ["LANGCHAIN_TRACING_V2"] = "true"
+        console.print("[green]✓[/green] LangSmith tracing enabled")
 
-    console.print("\n[bold cyan]✨ AI Orchestration Platform[/bold cyan]")
-    console.print(f"Repository: [yellow]{repo}[/yellow]")
+    # Load spec if provided
+    spec_content = None
+    if spec and spec.exists():
+        spec_content = spec.read_text()
+        console.print(f"[green]✓[/green] Loaded spec from {spec}")
+
+    # Validate inputs
+    if not issue and not pr and not spec_content:
+        console.print("[red]Error:[/red] Must provide --issue, --pr, or --spec")
+        raise typer.Exit(1)
+
+    console.print(f"\n[bold blue]AI Orchestration Platform[/bold blue]")
+    console.print(f"Repository: {repo}")
+    console.print(f"Mode: {mode}")
     if issue:
-        console.print(f"Issue: [yellow]#{issue}[/yellow]")
+        console.print(f"Issue: #{issue}")
     if pr:
-        console.print(f"PR: [yellow]#{pr}[/yellow]")
-    console.print(f"Mode: [yellow]{mode}[/yellow]\n")
+        console.print(f"PR: #{pr}")
+    console.print()
 
-    # Run orchestration
-    asyncio.run(execute_orchestration(repo, issue, pr, spec_content, mode))
+    # Create initial state
+    initial_state: OrchestrationState = {
+        "repo": repo,
+        "issue_number": issue,
+        "pr_number": pr,
+        "spec_content": spec_content,
+        "mode": mode,
+        "messages": [],
+        "plan": None,
+        "tasks": [],
+        "files_changed": [],
+        "branches_created": [],
+        "prs_created": [],
+        "test_results": None,
+        "test_failures": [],
+        "review_comments": [],
+        "approval_status": None,
+        "agent_results": [],
+        "current_agent": None,
+        "next_agents": [],
+        "retry_count": 0,
+        "max_retries": 3,
+        "started_at": datetime.now(),
+        "completed_at": None,
+        "error": None,
+    }
 
+    # Create and run graph
+    graph = create_orchestration_graph()
+    config = {"configurable": {"thread_id": f"cli-{datetime.now().timestamp()}"}}
 
-async def execute_orchestration(
-    repo: str,
-    issue_number: Optional[int],
-    pr_number: Optional[int],
-    spec_content: Optional[str],
-    mode: str,
-) -> None:
-    """Execute the orchestration workflow."""
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
-        task = progress.add_task("Initializing...", total=None)
+        task = progress.add_task("Running orchestration...", total=None)
 
         try:
-            # Create workflow
-            progress.update(task, description="Creating workflow graph...")
-            graph = create_orchestration_graph()
+            result = await graph.ainvoke(initial_state, config=config)
 
-            # Prepare state
-            initial_state: OrchestrationState = {
-                "repo": repo,
-                "issue_number": issue_number,
-                "pr_number": pr_number,
-                "spec_content": spec_content,
-                "mode": mode,
-                "messages": [],
-                "plan": None,
-                "tasks": [],
-                "files_changed": [],
-                "branches_created": [],
-                "prs_created": [],
-                "test_results": None,
-                "test_failures": [],
-                "review_comments": [],
-                "approval_status": None,
-                "agent_results": [],
-                "current_agent": None,
-                "next_agents": [],
-                "retry_count": 0,
-                "max_retries": 3,
-                "started_at": datetime.now(),
-                "completed_at": None,
-                "error": None,
-            }
-
-            # Execute workflow
-            progress.update(task, description="Executing workflow...")
-            result = await graph.ainvoke(
-                initial_state, {"configurable": {"thread_id": f"cli-{datetime.now().timestamp()}"}}
-            )
+            progress.update(task, completed=True, description="[green]✓ Complete[/green]")
 
             # Display results
-            progress.stop()
-            console.print("\n[bold green]✅ Orchestration Complete![/bold green]\n")
-
-            # Display summary
-            if result.get("plan"):
-                console.print("[bold]Plan:[/bold]")
-                console.print(f"  {result['plan'].get('summary', 'Created')}")
-                console.print(f"  Tasks: {len(result.get('tasks', []))}\n")
-
-            if result.get("files_changed"):
-                console.print("[bold]Files Changed:[/bold]")
-                for file in result["files_changed"]:
-                    console.print(f"  • {file}")
-                console.print()
-
-            if result.get("prs_created"):
-                console.print("[bold]Pull Requests:[/bold]")
-                for pr in result["prs_created"]:
-                    console.print(f"  • PR #{pr}")
-                console.print()
-
-            if result.get("test_results"):
-                test_results = result["test_results"]
-                status = "✅ PASSED" if test_results.get("passed") else "❌ FAILED"
-                console.print(f"[bold]Tests:[/bold] {status}")
-                console.print(f"  Generated: {test_results.get('tests_generated', 0)}\n")
-
-            if result.get("approval_status"):
-                console.print(f"[bold]Review:[/bold] {result['approval_status'].upper()}\n")
+            display_results(result)
 
         except Exception as e:
-            progress.stop()
-            console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")
-            raise typer.Exit(1)
+            progress.update(task, description=f"[red]✗ Failed: {e}[/red]")
+            raise
+
+
+def display_results(result: OrchestrationState) -> None:
+    """Display orchestration results."""
+    console.print("\n[bold green]Results[/bold green]\n")
+
+    # Agent results table
+    table = Table(title="Agent Execution")
+    table.add_column("Agent", style="cyan")
+    table.add_column("Status", style="magenta")
+    table.add_column("Output", style="white")
+
+    for agent_result in result.get("agent_results", []):
+        status_emoji = "✓" if agent_result["status"] == "completed" else "✗"
+        table.add_row(
+            agent_result["agent"].value,
+            f"{status_emoji} {agent_result['status'].value}",
+            agent_result["output"][:100] + "..." if len(agent_result["output"]) > 100 else agent_result["output"],
+        )
+
+    console.print(table)
+
+    # Plan summary
+    if result.get("plan"):
+        console.print("\n[bold]Plan Summary[/bold]")
+        plan = result["plan"]
+        console.print(f"Tasks: {len(plan.get('tasks', []))}")
+        console.print(f"Complexity: {plan.get('estimated_complexity', 'unknown')}")
+
+    # Implementation summary
+    if result.get("files_changed"):
+        console.print("\n[bold]Implementation[/bold]")
+        console.print(f"Files changed: {len(result['files_changed'])}")
+        for file in result["files_changed"][:5]:
+            console.print(f"  • {file}")
+        if len(result["files_changed"]) > 5:
+            console.print(f"  ... and {len(result['files_changed']) - 5} more")
+
+    # PR links
+    if result.get("prs_created"):
+        console.print("\n[bold]Pull Requests[/bold]")
+        for pr_num in result["prs_created"]:
+            pr_url = f"https://github.com/{result['repo']}/pull/{pr_num}"
+            console.print(f"  • PR #{pr_num}: {pr_url}")
+
+    # Test results
+    if result.get("test_results"):
+        test_res = result["test_results"]
+        console.print("\n[bold]Testing[/bold]")
+        console.print(
+            f"Tests: {test_res.get('passed_tests', 0)}/{test_res.get('total_tests', 0)} passed"
+        )
+        console.print(f"Coverage: {test_res.get('coverage', 0)}%")
+
+    console.print()
 
 
 @app.command()
-def version() -> None:
-    """Show version information."""
-    console.print("[bold]AI Orchestration Platform[/bold]")
-    console.print("Version: [cyan]0.1.0[/cyan]")
-    console.print(f"Python: [cyan]{settings.default_agent_model}[/cyan]")
+def init() -> None:
+    """Initialize configuration and verify setup."""
+    console.print("[bold blue]Initializing AI Orchestration Platform[/bold blue]\n")
+
+    try:
+        settings = get_settings()
+
+        # Check required keys
+        checks = [
+            ("Perplexity API", bool(settings.perplexity_api_key)),
+            ("GitHub Token", bool(settings.github_token)),
+            (
+                "LLM API",
+                bool(settings.anthropic_api_key or settings.openai_api_key),
+            ),
+        ]
+
+        for name, status in checks:
+            symbol = "[green]✓[/green]" if status else "[red]✗[/red]"
+            console.print(f"{symbol} {name}")
+
+        if all(status for _, status in checks):
+            console.print("\n[green]✓ Setup complete![/green]")
+        else:
+            console.print("\n[yellow]⚠ Some configurations missing. Check .env file.[/yellow]")
+
+    except Exception as e:
+        console.print(f"\n[red]✗ Error: {e}[/red]")
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

@@ -1,85 +1,107 @@
-# Agent configuration
-# Customize behavior, models, and tools for each agent
+# Agent Configuration
+# Customize agent behavior, models, and tool access
 
 agents:
   planner:
-    model: claude-3-5-sonnet-20241022
+    role: "Tech Lead / Architect"
+    model: "claude-3-5-sonnet-20241022"
     temperature: 0.3
-    max_tokens: 4000
-    tools:
-      - perplexity_research
-      - github_issues
-      - github_files
     max_iterations: 3
-    research_depth: standard  # quick, standard, deep
-    
-  architect:
-    model: claude-3-5-sonnet-20241022
-    temperature: 0.2
-    max_tokens: 8000
     tools:
-      - github_files
       - perplexity_research
-    max_iterations: 2
-    
+      - perplexity_search
+      - github_issues
+      - github_pr_read
+    responsibilities:
+      - Research best practices
+      - Analyze requirements
+      - Create implementation plan
+      - Identify risks and dependencies
+
   coder:
-    model: claude-3-5-sonnet-20241022
+    role: "Staff Engineer"
+    model: "claude-3-5-sonnet-20241022"
     temperature: 0.2
-    max_tokens: 8000
-    parallelism: 3  # Number of concurrent file operations
-    tools:
-      - github_files
-      - github_branches
-      - github_pr
+    max_iterations: 5
+    parallelism: 3
     max_files_per_pr: 10
-    auto_format: true
-    
+    tools:
+      - github_files_read
+      - github_files_write
+      - github_branch_create
+      - github_pr_create
+    responsibilities:
+      - Implement features
+      - Write production-quality code
+      - Follow best practices
+      - Handle errors gracefully
+
   tester:
-    model: claude-3-5-sonnet-20241022
+    role: "QA / Test Engineer"
+    model: "claude-3-5-sonnet-20241022"
     temperature: 0.2
-    max_tokens: 6000
+    max_iterations: 3
     tools:
-      - github_files
-      - pytest_runner
-    min_coverage: 80
+      - github_files_read
+      - github_pr_comment
     test_frameworks:
-      - pytest
-      - unittest
-    
+      python: "pytest"
+      typescript: "jest"
+      go: "testing"
+    responsibilities:
+      - Generate comprehensive tests
+      - Identify edge cases
+      - Verify error handling
+      - Report failures
+
   reviewer:
-    model: claude-3-5-sonnet-20241022
+    role: "Senior Engineer"
+    model: "claude-3-5-sonnet-20241022"
     temperature: 0.3
-    max_tokens: 6000
+    max_iterations: 2
     tools:
-      - github_pr
-      - github_files
-    auto_approve: false  # Require human approval
-    blocking_issues:
-      - security_vulnerability
-      - test_failure
-      - breaking_change
-    
+      - github_pr_read
+      - github_pr_diff
+      - github_pr_review
+    review_criteria:
+      - correctness
+      - design
+      - complexity
+      - tests
+      - naming
+      - documentation
+      - security
+      - performance
+    responsibilities:
+      - Review code quality
+      - Identify bugs and issues
+      - Suggest improvements
+      - Enforce standards
+
   devops:
-    model: claude-3-5-sonnet-20241022
+    role: "SRE / DevOps Engineer"
+    model: "claude-3-5-sonnet-20241022"
     temperature: 0.2
-    max_tokens: 6000
+    enabled: false  # Optional agent
     tools:
-      - github_files
-      - docker_ops
-    infrastructure_tools:
-      - terraform
-      - docker
-      - kubernetes
-    
+      - github_actions
+      - docker_operations
+    responsibilities:
+      - Infrastructure as code
+      - Deployment automation
+      - Environment management
+      - Monitoring setup
+
   security:
-    model: claude-3-5-sonnet-20241022
+    role: "Security Engineer"
+    model: "claude-3-5-sonnet-20241022"
     temperature: 0.1
-    max_tokens: 4000
+    enabled: false  # Optional agent
     tools:
-      - dependency_scanner
-      - secrets_scanner
-      - github_files
-    scanners:
-      - bandit
-      - safety
-      - semgrep
+      - github_secrets_scan
+      - dependency_audit
+    responsibilities:
+      - Dependency scanning
+      - Secrets detection
+      - Permission enforcement
+      - Vulnerability assessment

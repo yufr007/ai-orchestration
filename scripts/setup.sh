@@ -1,72 +1,66 @@
 #!/bin/bash
-# Setup script for AI Orchestration Platform
+# Setup script for local development
 
 set -e
 
-echo "🚀 Setting up AI Orchestration Platform..."
+echo "=== AI Orchestration Platform Setup ==="
 echo ""
 
-# Check Python version
-if ! command -v python3 &> /dev/null; then
-    echo "❌ Python 3 is not installed. Please install Python 3.10+"
-    exit 1
-fi
+# Check prerequisites
+echo "Checking prerequisites..."
+command -v python3 >/dev/null 2>&1 || { echo "Error: Python 3.10+ required"; exit 1; }
+command -v node >/dev/null 2>&1 || { echo "Error: Node.js 20+ required"; exit 1; }
+command -v git >/dev/null 2>&1 || { echo "Error: Git required"; exit 1; }
 
-PYTHON_VERSION=$(python3 --version | cut -d" " -f2 | cut -d"." -f1,2)
-echo "✅ Python $PYTHON_VERSION found"
-
-# Check Node.js
-if ! command -v node &> /dev/null; then
-    echo "❌ Node.js is not installed. Please install Node.js 20+"
-    exit 1
-fi
-
-NODE_VERSION=$(node --version)
-echo "✅ Node.js $NODE_VERSION found"
+echo "  ✓ Python $(python3 --version)"
+echo "  ✓ Node $(node --version)"
+echo "  ✓ Git $(git --version)"
+echo ""
 
 # Create virtual environment
 if [ ! -d "venv" ]; then
-    echo "
-📦 Creating virtual environment..."
+    echo "Creating virtual environment..."
     python3 -m venv venv
+    echo "  ✓ Virtual environment created"
+else
+    echo "  ✓ Virtual environment exists"
 fi
 
 # Activate virtual environment
+echo "Activating virtual environment..."
 source venv/bin/activate
 
 # Install Python dependencies
-echo "
-📥 Installing Python dependencies..."
-pip install --upgrade pip
-pip install -r requirements.txt
+echo "Installing Python dependencies..."
+pip install --upgrade pip >/dev/null 2>&1
+pip install -r requirements.txt >/dev/null 2>&1
+echo "  ✓ Python packages installed"
 
 # Install Perplexity MCP server
-echo "
-🔧 Installing Perplexity MCP server..."
-npm install -g @perplexity-ai/mcp-server
+echo "Installing Perplexity MCP server..."
+npm install -g @perplexity-ai/mcp-server >/dev/null 2>&1
+echo "  ✓ Perplexity MCP server installed"
 
 # Setup environment file
 if [ ! -f ".env" ]; then
-    echo "
-⚙️  Creating .env file from template..."
+    echo "Creating .env file..."
     cp .env.example .env
-    echo "✅ .env created - please edit with your API keys"
+    echo "  ⚠️  Please edit .env and add your API keys"
 else
-    echo "
-✅ .env file already exists"
+    echo "  ✓ .env file exists"
 fi
 
 # Initialize database
-echo "
-💾 Initializing database..."
-python -m src.cli.init_db init
+echo "Initializing database..."
+python -m src.cli.init_db
 
 echo ""
-echo "✅ Setup complete!"
+echo "=== Setup Complete! ==="
 echo ""
 echo "Next steps:"
-echo "  1. Edit .env with your API keys"
+echo "  1. Edit .env and add your API keys"
 echo "  2. Activate venv: source venv/bin/activate"
-echo "  3. Test setup: python -m src.tools.test_mcp"
-echo "  4. Run orchestration: python -m src.cli.orchestrate --help"
+echo "  3. Run tests: pytest"
+echo "  4. Start server: uvicorn src.api.server:app --reload"
+echo "  5. Or use CLI: python -m src.cli.orchestrate --help"
 echo ""

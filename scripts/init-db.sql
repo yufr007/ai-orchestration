@@ -1,79 +1,52 @@
 -- PostgreSQL initialization script
--- This runs when the database container starts
+-- Used by docker-compose for initial database setup
 
--- Jobs table
+-- Orchestration jobs table
 CREATE TABLE IF NOT EXISTS jobs (
-    id VARCHAR(36) PRIMARY KEY,
-    repo VARCHAR(255) NOT NULL,
+    id TEXT PRIMARY KEY,
+    repo TEXT NOT NULL,
     issue_number INTEGER,
     pr_number INTEGER,
-    mode VARCHAR(50) NOT NULL,
-    status VARCHAR(50) NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    spec_content TEXT,
+    mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMP,
     error TEXT,
-    INDEX idx_repo (repo),
-    INDEX idx_status (status),
-    INDEX idx_created_at (created_at)
+    result JSONB
 );
 
--- Agent results table
+-- Agent execution results
 CREATE TABLE IF NOT EXISTS agent_results (
     id SERIAL PRIMARY KEY,
-    job_id VARCHAR(36) NOT NULL,
-    agent VARCHAR(50) NOT NULL,
-    status VARCHAR(50) NOT NULL,
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    agent TEXT NOT NULL,
+    status TEXT NOT NULL,
     output TEXT,
     artifacts JSONB,
     metadata JSONB,
-    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
-    INDEX idx_job_id (job_id),
-    INDEX idx_agent (agent),
-    INDEX idx_timestamp (timestamp)
+    timestamp TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
--- Checkpoints table (for LangGraph persistence)
+-- Workflow checkpoints (used by LangGraph)
 CREATE TABLE IF NOT EXISTS checkpoints (
-    thread_id VARCHAR(255) NOT NULL,
-    checkpoint_id VARCHAR(255) NOT NULL,
-    parent_id VARCHAR(255),
+    thread_id TEXT NOT NULL,
+    checkpoint_id TEXT NOT NULL,
     checkpoint BYTEA NOT NULL,
     metadata JSONB,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (thread_id, checkpoint_id),
-    INDEX idx_thread_id (thread_id),
-    INDEX idx_parent_id (parent_id)
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (thread_id, checkpoint_id)
 );
 
--- Metrics table (for observability)
-CREATE TABLE IF NOT EXISTS metrics (
-    id SERIAL PRIMARY KEY,
-    job_id VARCHAR(36),
-    metric_name VARCHAR(100) NOT NULL,
-    metric_value NUMERIC,
-    labels JSONB,
-    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_job_id (job_id),
-    INDEX idx_metric_name (metric_name),
-    INDEX idx_timestamp (timestamp)
-);
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_jobs_repo ON jobs(repo);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_results_job ON agent_results(job_id);
+CREATE INDEX IF NOT EXISTS idx_agent_results_agent ON agent_results(agent);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_thread ON checkpoints(thread_id);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_created ON checkpoints(created_at DESC);
 
--- Create views for analytics
-CREATE OR REPLACE VIEW job_statistics AS
-SELECT 
-    status,
-    COUNT(*) as count,
-    AVG(EXTRACT(EPOCH FROM (completed_at - created_at))) as avg_duration_seconds
-FROM jobs
-WHERE completed_at IS NOT NULL
-GROUP BY status;
-
-CREATE OR REPLACE VIEW agent_performance AS
-SELECT 
-    agent,
-    status,
-    COUNT(*) as executions,
-    AVG(LENGTH(output)) as avg_output_length
-FROM agent_results
-GROUP BY agent, status;
+-- Grant permissions
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO orchestration;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO orchestration;

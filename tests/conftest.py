@@ -1,49 +1,60 @@
 """Pytest configuration and fixtures."""
 
 import os
-from typing import Any, Generator
-
 import pytest
-from unittest.mock import MagicMock, patch
+from datetime import datetime
 
 from src.config import Settings
+from src.core.state import OrchestrationState
 
 
 @pytest.fixture
 def test_settings() -> Settings:
-    """Provide test settings with mock API keys."""
+    """Create test settings."""
     return Settings(
-        perplexity_api_key="test_perplexity_key",
-        anthropic_api_key="test_anthropic_key",
-        github_token="test_github_token",
-        github_owner="test_owner",
-        database_url="sqlite:///:memory:",
         environment="development",
+        perplexity_api_key="test-key",
+        github_token="test-token",
+        github_owner="test-owner",
+        anthropic_api_key="test-anthropic-key",
+        database_url="sqlite:///:memory:",
     )
 
 
 @pytest.fixture
-def mock_github_client() -> Generator[MagicMock, None, None]:
-    """Mock GitHub client."""
-    with patch("src.tools.github.get_github_client") as mock:
-        client = MagicMock()
-        mock.return_value = client
-        yield client
+def initial_state() -> OrchestrationState:
+    """Create initial orchestration state."""
+    return OrchestrationState(
+        repo="test-owner/test-repo",
+        issue_number=123,
+        pr_number=None,
+        spec_content=None,
+        mode="autonomous",
+        messages=[],
+        plan=None,
+        tasks=[],
+        files_changed=[],
+        branches_created=[],
+        prs_created=[],
+        test_results=None,
+        test_failures=[],
+        review_comments=[],
+        approval_status=None,
+        agent_results=[],
+        current_agent=None,
+        next_agents=[],
+        retry_count=0,
+        max_retries=3,
+        started_at=datetime.now(),
+        completed_at=None,
+        error=None,
+    )
 
 
-@pytest.fixture
-def mock_perplexity_client() -> Generator[MagicMock, None, None]:
-    """Mock Perplexity client."""
-    with patch("src.tools.perplexity.get_perplexity_client") as mock:
-        client = MagicMock()
-        mock.return_value = client
-        yield client
-
-
-@pytest.fixture
-def mock_llm() -> Generator[MagicMock, None, None]:
-    """Mock LLM for testing agents."""
-    with patch("langchain_anthropic.ChatAnthropic") as mock:
-        llm = MagicMock()
-        mock.return_value = llm
-        yield llm
+@pytest.fixture(autouse=True)
+def mock_env_vars(monkeypatch):
+    """Mock environment variables for tests."""
+    monkeypatch.setenv("PERPLEXITY_API_KEY", "test-key")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setenv("GITHUB_OWNER", "test-owner")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")

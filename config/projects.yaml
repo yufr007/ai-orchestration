@@ -1,65 +1,55 @@
-# Project mappings
-# Configure target repositories and their agent teams
+# Project Configuration
+# Map target repositories and their settings
 
 projects:
   vitaflow:
     repo: yufr007/vitaflow
     branch: main
     specs_dir: docs/specs
-    description: "Digital health platform"
+    test_dir: tests
     agents:
       - planner
       - coder
       - tester
       - reviewer
     settings:
-      auto_deploy: false
-      require_human_review: true
-      min_test_coverage: 80
-    
+      require_tests: true
+      require_review: true
+      auto_merge: false
+      max_pr_size: 15
+
   autom8:
     repo: yufr007/autom8
     branch: develop
     specs_dir: specs
-    description: "Automation platform"
+    test_dir: tests
     agents:
       - planner
       - coder
-      - tester
       - devops
+      - tester
       - security
       - reviewer
     settings:
-      auto_deploy: false
-      require_human_review: true
-      min_test_coverage: 85
-      security_scan: true
-    
+      require_tests: true
+      require_review: true
+      require_security_scan: true
+      auto_merge: false
+      max_pr_size: 20
+
   ai-orchestration:
     repo: yufr007/ai-orchestration
     branch: main
     specs_dir: docs/specs
-    description: "This orchestration platform itself"
+    test_dir: tests
     agents:
       - planner
       - coder
       - tester
       - reviewer
     settings:
-      auto_deploy: false
-      require_human_review: true
-      min_test_coverage: 90
-      dogfooding: true
-
-# Default settings for unmapped projects
-default:
-  branch: main
-  specs_dir: docs
-  agents:
-    - planner
-    - coder
-    - reviewer
-  settings:
-    auto_deploy: false
-    require_human_review: true
-    min_test_coverage: 75
+      require_tests: true
+      require_review: true
+      auto_merge: false
+      max_pr_size: 10
+      strict_mode: true

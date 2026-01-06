@@ -1,19 +1,21 @@
 """Tools and integrations for agents."""
 
-from .perplexity_mcp import perplexity_research
-from .github_tools import (
+from src.tools.perplexity import research_with_perplexity
+from src.tools.github import (
     get_issue_details,
-    get_file_contents,
+    get_repository_context,
     create_branch,
+    get_file_contents,
     create_or_update_file,
     create_pull_request,
 )
 
 __all__ = [
-    "perplexity_research",
+    "research_with_perplexity",
     "get_issue_details",
-    "get_file_contents",
+    "get_repository_context",
     "create_branch",
+    "get_file_contents",
     "create_or_update_file",
     "create_pull_request",
 ]

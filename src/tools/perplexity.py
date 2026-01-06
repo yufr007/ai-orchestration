@@ -1,104 +1,144 @@
-"""Perplexity MCP client for research and web search."""
+"""Perplexity MCP integration for research and knowledge gathering."""
 
 import asyncio
 import json
+import os
 from typing import Any
 
 import httpx
-
 from src.config import get_settings
 
 
-class PerplexityClient:
-    """Client for Perplexity API via MCP server."""
+class PerplexityMCP:
+    """Client for Perplexity MCP server."""
 
     def __init__(self) -> None:
         self.settings = get_settings()
+        self.api_key = self.settings.perplexity_api_key
+        self.model = self.settings.perplexity_model
+        self.timeout = self.settings.perplexity_timeout_ms / 1000.0
         self.base_url = "https://api.perplexity.ai"
-        self.headers = {
-            "Authorization": f"Bearer {self.settings.perplexity_api_key}",
-            "Content-Type": "application/json",
-        }
 
-    async def search(self, query: str, model: str | None = None) -> dict[str, Any]:
-        """Execute a Perplexity search.
-
+    async def search(self, query: str, **kwargs: Any) -> str:
+        """Execute a search query via Perplexity API.
+        
         Args:
-            query: Search query
-            model: Model to use (defaults to settings.perplexity_model)
-
+            query: Search query string
+            **kwargs: Additional parameters (model, temperature, etc.)
+        
         Returns:
-            Search results with citations
+            Search results as formatted string
         """
-        model = model or self.settings.perplexity_model
-
-        payload = {
-            "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a helpful research assistant. Provide accurate, well-cited information.",
-                },
-                {"role": "user", "content": query},
-            ],
-        }
-
-        async with httpx.AsyncClient(timeout=self.settings.perplexity_timeout_ms / 1000) as client:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(
                 f"{self.base_url}/chat/completions",
-                headers=self.headers,
-                json=payload,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": kwargs.get("model", self.model),
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are a helpful research assistant. Provide accurate, well-sourced information.",
+                        },
+                        {"role": "user", "content": query},
+                    ],
+                    "temperature": kwargs.get("temperature", 0.2),
+                    "max_tokens": kwargs.get("max_tokens", 1000),
+                },
             )
             response.raise_for_status()
-            return response.json()
-
-    async def research(self, query: str) -> str:
-        """Perform research and return formatted results.
-
-        Args:
-            query: Research question
-
-        Returns:
-            Formatted research findings with citations
-        """
-        try:
-            result = await self.search(query)
-            content = result["choices"][0]["message"]["content"]
-            citations = result.get("citations", [])
-
-            # Format output
-            output = f"{content}\n\n"
+            data = response.json()
+            
+            # Extract content and citations
+            content = data["choices"][0]["message"]["content"]
+            
+            # Check for citations in response
+            citations = data.get("citations", [])
             if citations:
-                output += "**Sources:**\n"
+                content += "\n\nSources:\n"
                 for i, citation in enumerate(citations, 1):
-                    output += f"{i}. {citation}\n"
+                    content += f"{i}. {citation}\n"
+            
+            return content
 
-            return output
+    async def research(self, topic: str, depth: str = "standard") -> dict[str, Any]:
+        """Perform deep research on a topic.
+        
+        Args:
+            topic: Research topic
+            depth: Research depth ("quick", "standard", "deep")
+        
+        Returns:
+            Structured research results
+        """
+        queries = []
+        
+        if depth == "quick":
+            queries = [topic]
+        elif depth == "standard":
+            queries = [
+                topic,
+                f"{topic} best practices",
+                f"{topic} common pitfalls",
+            ]
+        else:  # deep
+            queries = [
+                topic,
+                f"{topic} best practices",
+                f"{topic} common pitfalls",
+                f"{topic} implementation guide",
+                f"{topic} performance considerations",
+            ]
+        
+        results = await asyncio.gather(*[self.search(q) for q in queries])
+        
+        return {
+            "topic": topic,
+            "depth": depth,
+            "queries": queries,
+            "results": dict(zip(queries, results)),
+            "summary": results[0],  # First result as summary
+        }
 
-        except Exception as e:
-            return f"Research failed: {str(e)}"
+
+# Singleton instance
+_perplexity_client: PerplexityMCP | None = None
 
 
-# Global client instance
-_client: PerplexityClient | None = None
+def get_perplexity_client() -> PerplexityMCP:
+    """Get or create Perplexity MCP client singleton."""
+    global _perplexity_client
+    if _perplexity_client is None:
+        _perplexity_client = PerplexityMCP()
+    return _perplexity_client
 
 
-def get_perplexity_client() -> PerplexityClient:
-    """Get or create Perplexity client singleton."""
-    global _client
-    if _client is None:
-        _client = PerplexityClient()
-    return _client
-
-
-async def perplexity_research(query: str) -> str:
-    """Convenience function for research.
-
+async def search_perplexity(query: str, **kwargs: Any) -> str:
+    """Convenience function to search via Perplexity.
+    
     Args:
-        query: Research question
-
+        query: Search query
+        **kwargs: Additional parameters
+    
     Returns:
-        Formatted research results
+        Search results
     """
     client = get_perplexity_client()
-    return await client.research(query)
+    return await client.search(query, **kwargs)
+
+
+async def research_topic(topic: str, depth: str = "standard") -> dict[str, Any]:
+    """Convenience function to research a topic.
+    
+    Args:
+        topic: Research topic
+        depth: Research depth
+    
+    Returns:
+        Structured research results
+    """
+    client = get_perplexity_client()
+    return await client.research(topic, depth)

@@ -1,124 +1,123 @@
-"""Perplexity MCP integration for research capabilities."""
+"""Perplexity MCP integration for research and knowledge retrieval."""
 
 import asyncio
 import json
-import subprocess
 from typing import Any
 
 from src.config import get_settings
 
 
-class PerplexityMCP:
-    """Wrapper for Perplexity MCP server."""
-
+class PerplexityMCPClient:
+    """Client for Perplexity MCP server."""
+    
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.server_process: subprocess.Popen | None = None
-
-    async def start_server(self) -> None:
-        """Start Perplexity MCP server if not already running."""
-        if self.server_process is not None:
+        self.process: asyncio.subprocess.Process | None = None
+    
+    async def start(self) -> None:
+        """Start the Perplexity MCP server."""
+        if self.process:
             return
-
-        # Start MCP server as subprocess
-        env = {
-            "PERPLEXITY_API_KEY": self.settings.perplexity_api_key,
-            "PERPLEXITY_MODEL": self.settings.perplexity_model,
+        
+        # Start MCP server
+        self.process = await asyncio.create_subprocess_exec(
+            "npx",
+            "@perplexity-ai/mcp-server",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={
+                "PERPLEXITY_API_KEY": self.settings.perplexity_api_key,
+                "PERPLEXITY_MODEL": self.settings.perplexity_model,
+            },
+        )
+    
+    async def stop(self) -> None:
+        """Stop the Perplexity MCP server."""
+        if self.process:
+            self.process.terminate()
+            await self.process.wait()
+            self.process = None
+    
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+        """Call a tool via MCP protocol."""
+        if not self.process or not self.process.stdin or not self.process.stdout:
+            await self.start()
+        
+        # Construct MCP request
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments,
+            },
         }
-
-        # In production, use proper process management
-        # For now, assume server is managed externally
-        pass
-
-    async def search(self, query: str, max_results: int = 5) -> dict[str, Any]:
-        """Execute search via Perplexity MCP."""
-        # This would use the MCP protocol to call the Perplexity server
-        # For now, simulate with direct API call
-
-        import httpx
-
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(
-                    "https://api.perplexity.ai/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.settings.perplexity_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": self.settings.perplexity_model,
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": "Be precise and concise. Provide key facts and sources.",
-                            },
-                            {"role": "user", "content": query},
-                        ],
-                        "max_tokens": 1000,
-                        "temperature": 0.2,
-                        "return_citations": True,
-                    },
-                    timeout=60.0,
-                )
-                response.raise_for_status()
-                data = response.json()
-
-                # Extract content and citations
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                citations = data.get("citations", [])
-
-                return {
-                    "content": content,
-                    "citations": citations,
-                    "model": data.get("model"),
-                }
-
-            except Exception as e:
-                return {"error": str(e), "content": "", "citations": []}
-
-    async def stop_server(self) -> None:
-        """Stop MCP server."""
-        if self.server_process:
-            self.server_process.terminate()
-            self.server_process = None
+        
+        # Send request
+        request_json = json.dumps(request) + "\n"
+        self.process.stdin.write(request_json.encode())
+        await self.process.stdin.drain()
+        
+        # Read response
+        response_line = await self.process.stdout.readline()
+        response = json.loads(response_line.decode())
+        
+        if "error" in response:
+            raise Exception(f"MCP Error: {response['error']}")
+        
+        return response.get("result")
+    
+    async def search_web(self, query: str) -> str:
+        """Search the web using Perplexity."""
+        result = await self.call_tool(
+            "search_web",
+            {"queries": [query]},
+        )
+        
+        # Extract content from results
+        if isinstance(result, list) and len(result) > 0:
+            return result[0].get("content", "")
+        return str(result)
 
 
-# Singleton instance
-_perplexity_mcp: PerplexityMCP | None = None
+# Global client instance
+_client: PerplexityMCPClient | None = None
 
 
-def get_perplexity_mcp() -> PerplexityMCP:
-    """Get or create PerplexityMCP instance."""
-    global _perplexity_mcp
-    if _perplexity_mcp is None:
-        _perplexity_mcp = PerplexityMCP()
-    return _perplexity_mcp
+async def get_perplexity_client() -> PerplexityMCPClient:
+    """Get or create the global Perplexity MCP client."""
+    global _client
+    if _client is None:
+        _client = PerplexityMCPClient()
+        await _client.start()
+    return _client
 
 
-async def research_with_perplexity(query: str) -> dict[str, Any]:
-    """Research a topic using Perplexity.
-
+async def perplexity_research(query: str, max_results: int = 3) -> str:
+    """Research a topic using Perplexity's web search.
+    
     Args:
         query: Search query
-
+        max_results: Maximum number of results to return
+    
     Returns:
-        Dictionary with research results including content, citations, and key points
+        Combined research findings as text
     """
-    mcp = get_perplexity_mcp()
-    result = await mcp.search(query)
+    client = await get_perplexity_client()
+    
+    try:
+        result = await client.search_web(query)
+        return result
+    except Exception as e:
+        print(f"Perplexity research failed: {e}")
+        return f"Research failed for query: {query}"
 
-    # Parse and structure the response
-    content = result.get("content", "")
-    citations = result.get("citations", [])
 
-    # Extract key points (simple sentence splitting)
-    sentences = [s.strip() for s in content.split(".") if s.strip()]
-    key_points = sentences[:5]  # Top 5 sentences
-
-    return {
-        "query": query,
-        "summary": content[:500],  # First 500 chars
-        "key_points": key_points,
-        "citations": citations,
-        "full_content": content,
-    }
+async def shutdown_perplexity() -> None:
+    """Shutdown the Perplexity MCP client."""
+    global _client
+    if _client:
+        await _client.stop()
+        _client = None

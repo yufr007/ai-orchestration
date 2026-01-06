@@ -1,6 +1,6 @@
-"""Tools for agent operations."""
+"""Tool integrations for agents."""
 
-from .perplexity import research_with_perplexity
+from .perplexity import perplexity_research
 from .github import (
     get_issue_details,
     get_pr_details,
@@ -8,18 +8,16 @@ from .github import (
     create_branch,
     create_or_update_file,
     create_pull_request,
-    get_pr_diff,
     add_pr_review_comment,
 )
 
 __all__ = [
-    "research_with_perplexity",
+    "perplexity_research",
     "get_issue_details",
     "get_pr_details",
     "get_file_contents",
     "create_branch",
     "create_or_update_file",
     "create_pull_request",
-    "get_pr_diff",
     "add_pr_review_comment",
 ]

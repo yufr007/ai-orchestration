@@ -1,0 +1,62 @@
+# Agent configuration
+
+agents:
+  planner:
+    model: claude-3-5-sonnet-20241022
+    temperature: 0.3
+    max_iterations: 3
+    tools:
+      - perplexity_research
+      - github_issues
+      - github_repository
+    description: "Technical lead responsible for planning and architecture"
+
+  coder:
+    model: claude-3-5-sonnet-20241022
+    temperature: 0.2
+    max_iterations: 5
+    parallelism: 3
+    max_files_per_pr: 10
+    tools:
+      - github_files
+      - github_branches
+      - github_pull_requests
+    description: "Staff engineer implementing features"
+
+  tester:
+    model: claude-3-5-sonnet-20241022
+    temperature: 0.1
+    max_iterations: 2
+    coverage_threshold: 80
+    tools:
+      - github_files
+      - pytest_runner
+    description: "QA engineer generating and running tests"
+
+  reviewer:
+    model: claude-3-5-sonnet-20241022
+    temperature: 0.1
+    max_iterations: 2
+    tools:
+      - github_pull_requests
+      - github_reviews
+    description: "Senior engineer performing code review"
+
+  devops:
+    model: claude-3-5-sonnet-20241022
+    temperature: 0.2
+    max_iterations: 3
+    tools:
+      - github_workflows
+      - docker
+      - azure
+    description: "DevOps engineer managing infrastructure"
+
+  security:
+    model: claude-3-5-sonnet-20241022
+    temperature: 0.1
+    max_iterations: 2
+    tools:
+      - security_scanner
+      - github_security
+    description: "Security engineer scanning for vulnerabilities"

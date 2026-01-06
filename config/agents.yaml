@@ -1,4 +1,5 @@
-# Agent configuration
+# Agent Configuration
+# Customize behavior of each agent type
 
 agents:
   planner:
@@ -9,54 +10,67 @@ agents:
       - perplexity_research
       - github_issues
       - github_repository
-    description: "Technical lead responsible for planning and architecture"
+    prompts:
+      system: "You are an elite Tech Lead creating detailed implementation plans."
 
   coder:
     model: claude-3-5-sonnet-20241022
     temperature: 0.2
     max_iterations: 5
-    parallelism: 3
+    parallelism: 3  # Max parallel file operations
     max_files_per_pr: 10
     tools:
       - github_files
       - github_branches
-      - github_pull_requests
-    description: "Staff engineer implementing features"
+      - github_pr
+    prompts:
+      system: "You are a Staff Software Engineer implementing production-grade code."
 
   tester:
     model: claude-3-5-sonnet-20241022
-    temperature: 0.1
-    max_iterations: 2
-    coverage_threshold: 80
+    temperature: 0.1  # Low temperature for consistent tests
+    max_iterations: 3
+    min_coverage: 80  # Minimum test coverage percentage
     tools:
       - github_files
-      - pytest_runner
-    description: "QA engineer generating and running tests"
+      - github_pr_comment
+    prompts:
+      system: "You are a QA Engineer ensuring code quality through comprehensive testing."
 
   reviewer:
     model: claude-3-5-sonnet-20241022
     temperature: 0.1
     max_iterations: 2
+    auto_approve: false  # Never auto-approve, always require human review
     tools:
-      - github_pull_requests
-      - github_reviews
-    description: "Senior engineer performing code review"
+      - github_pr
+      - github_pr_review
+    prompts:
+      system: "You are a Senior Engineering Manager performing thorough code review."
 
   devops:
     model: claude-3-5-sonnet-20241022
     temperature: 0.2
     max_iterations: 3
     tools:
-      - github_workflows
-      - docker
-      - azure
-    description: "DevOps engineer managing infrastructure"
+      - github_actions
+      - github_environments
+    prompts:
+      system: "You are an SRE implementing infrastructure and deployment automation."
 
   security:
     model: claude-3-5-sonnet-20241022
     temperature: 0.1
     max_iterations: 2
     tools:
-      - security_scanner
       - github_security
-    description: "Security engineer scanning for vulnerabilities"
+      - github_dependencies
+    prompts:
+      system: "You are a Security Engineer identifying and fixing vulnerabilities."
+
+# Global settings
+global:
+  max_concurrent_agents: 5
+  default_timeout: 600  # seconds
+  retry_on_failure: true
+  max_retries: 3

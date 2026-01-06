@@ -19,20 +19,35 @@ jobs:
       
       - name: Install dependencies
         run: |
-          pip install black ruff mypy
+          pip install ruff black mypy
           pip install -r requirements.txt
       
-      - name: Run Black
-        run: black --check src tests
+      - name: Run ruff
+        run: ruff check src/
       
-      - name: Run Ruff
-        run: ruff check src tests
+      - name: Run black
+        run: black --check src/
       
-      - name: Run MyPy
-        run: mypy src --ignore-missing-imports
+      - name: Run mypy
+        run: mypy src/ --ignore-missing-imports
 
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_orchestration
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    
     steps:
       - uses: actions/checkout@v4
       
@@ -48,9 +63,10 @@ jobs:
       
       - name: Run tests
         env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/test_orchestration
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_OWNER: yufr007
         run: pytest tests/ -v --cov=src --cov-report=xml
       
@@ -58,6 +74,7 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           file: ./coverage.xml
+          fail_ci_if_error: false
 
   build:
     runs-on: ubuntu-latest

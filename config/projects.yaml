@@ -1,29 +1,33 @@
 # Project-specific configurations
+# Map repositories to specific settings and agents
 
 projects:
   vitaflow:
     repo: yufr007/vitaflow
     branch: main
     specs_dir: docs/specs
-    language: python
-    framework: fastapi
+    language: typescript
+    framework: nextjs
     agents:
       - planner
       - coder
       - tester
       - reviewer
-    rules:
-      - "Follow FastAPI best practices"
-      - "Use Pydantic v2 models"
-      - "Include comprehensive docstrings"
-      - "Maintain 80%+ test coverage"
+    settings:
+      min_test_coverage: 80
+      auto_format: true
+      style_guide: airbnb
+    gates:
+      - tests_pass
+      - review_approved
+      - no_security_issues
 
   autom8:
     repo: yufr007/autom8
     branch: develop
     specs_dir: specs
-    language: typescript
-    framework: nextjs
+    language: python
+    framework: fastapi
     agents:
       - planner
       - coder
@@ -31,26 +35,48 @@ projects:
       - devops
       - security
       - reviewer
-    rules:
-      - "Use TypeScript strict mode"
-      - "Follow Next.js 14 app router conventions"
-      - "Write unit tests with Jest"
-      - "Use shadcn/ui components"
-      - "Implement proper error boundaries"
+    settings:
+      min_test_coverage: 85
+      auto_format: true
+      style_guide: black
+    gates:
+      - tests_pass
+      - security_scan_pass
+      - review_approved
+      - deployment_validated
 
   ai-orchestration:
     repo: yufr007/ai-orchestration
     branch: main
-    specs_dir: docs
+    specs_dir: docs/specs
     language: python
     framework: langgraph
     agents:
       - planner
       - coder
       - tester
+      - security
       - reviewer
-    rules:
-      - "Follow LangGraph patterns"
-      - "Use structured logging"
-      - "Implement comprehensive error handling"
-      - "Write async-first code"
+    settings:
+      min_test_coverage: 80
+      auto_format: true
+      style_guide: black
+    gates:
+      - tests_pass
+      - review_approved
+
+# Default project settings (used when repo not found above)
+default:
+  branch: main
+  specs_dir: specs
+  agents:
+    - planner
+    - coder
+    - tester
+    - reviewer
+  settings:
+    min_test_coverage: 70
+    auto_format: false
+  gates:
+    - tests_pass
+    - review_approved

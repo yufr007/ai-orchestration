@@ -6,18 +6,19 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
-from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.table import Table
 
 from src.config import get_settings
 from src.core.graph import create_orchestration_graph
 from src.core.state import OrchestrationState
 
-
 app = typer.Typer(
     name="orchestrate",
-    help="AI Orchestration Platform - Elite multi-agent development team",
+    help="AI Orchestration Platform CLI",
+    add_completion=False,
 )
+
 console = Console()
 
 
@@ -26,55 +27,24 @@ def run(
     repo: str = typer.Option(..., "--repo", "-r", help="Repository (owner/repo)"),
     issue: int | None = typer.Option(None, "--issue", "-i", help="GitHub issue number"),
     pr: int | None = typer.Option(None, "--pr", "-p", help="GitHub PR number"),
-    spec: Path | None = typer.Option(None, "--spec", "-s", help="Path to specification file"),
+    spec: Path | None = typer.Option(None, "--spec", "-s", help="Specification file path"),
     mode: str = typer.Option(
-        "autonomous",
-        "--mode",
-        "-m",
-        help="Mode: autonomous, plan, or review",
+        "autonomous", "--mode", "-m", help="Mode: autonomous, plan, or review"
     ),
-    max_retries: int = typer.Option(3, "--max-retries", help="Maximum retry attempts"),
-    trace: bool = typer.Option(False, "--trace", help="Enable LangSmith tracing"),
 ) -> None:
-    """Run an orchestration workflow.
-
-    Examples:
-        # Implement a GitHub issue
-        orchestrate run --repo yufr007/vitaflow --issue 123
-
-        # Plan from specification
-        orchestrate run --repo yufr007/autom8 --spec specs/feature.md --mode plan
-
-        # Review existing PR
-        orchestrate run --repo yufr007/vitaflow --pr 45 --mode review
-    """
-    console.print("\n[bold cyan]🤖 AI Orchestration Platform[/bold cyan]\n")
-
-    # Load spec if provided
+    """Run an orchestration workflow."""
+    console.print("\n[bold cyan]AI Orchestration Platform[/bold cyan]\n")
+    
+    # Load spec content if provided
     spec_content = None
     if spec:
         if not spec.exists():
-            console.print(f"[red]❌ Spec file not found: {spec}[/red]")
+            console.print(f"[red]Error: Spec file not found: {spec}[/red]")
             raise typer.Exit(1)
         spec_content = spec.read_text()
-        console.print(f"[green]✅ Loaded spec from {spec}[/green]")
-
-    # Validate inputs
-    if not issue and not pr and not spec_content:
-        console.print("[red]❌ Must provide --issue, --pr, or --spec[/red]")
-        raise typer.Exit(1)
-
-    # Enable tracing if requested
-    if trace:
-        settings = get_settings()
-        if settings.langsmith_api_key:
-            import os
-
-            os.environ["LANGCHAIN_TRACING_V2"] = "true"
-            console.print("[green]✅ LangSmith tracing enabled[/green]\n")
-
+    
     # Create initial state
-    initial_state: OrchestrationState = {
+    state: OrchestrationState = {
         "repo": repo,
         "issue_number": issue,
         "pr_number": pr,
@@ -94,91 +64,103 @@ def run(
         "current_agent": None,
         "next_agents": [],
         "retry_count": 0,
-        "max_retries": max_retries,
+        "max_retries": 3,
         "started_at": datetime.now(),
         "completed_at": None,
         "error": None,
     }
+    
+    console.print(f"Repository: [bold]{repo}[/bold]")
+    if issue:
+        console.print(f"Issue: [bold]#{issue}[/bold]")
+    if pr:
+        console.print(f"PR: [bold]#{pr}[/bold]")
+    console.print(f"Mode: [bold]{mode}[/bold]\n")
+    
+    # Run workflow
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Running orchestration...", total=None)
+        
+        try:
+            final_state = asyncio.run(run_workflow(state, progress, task))
+            
+            progress.update(task, description="[green]Complete!")
+            
+            # Display results
+            display_results(final_state)
+            
+        except Exception as e:
+            progress.update(task, description="[red]Failed!")
+            console.print(f"\n[red]Error: {e}[/red]")
+            raise typer.Exit(1)
 
-    # Run orchestration
-    asyncio.run(run_orchestration(initial_state))
+
+async def run_workflow(
+    state: OrchestrationState, progress: Progress, task_id: int
+) -> OrchestrationState:
+    """Run the orchestration workflow."""
+    graph = create_orchestration_graph()
+    
+    config = {"configurable": {"thread_id": "cli-session"}}
+    
+    final_state = state
+    
+    async for event in graph.astream(state, config):
+        # Update progress with current agent
+        for node_name, node_state in event.items():
+            if "current_agent" in node_state:
+                agent = node_state["current_agent"]
+                progress.update(task_id, description=f"Running {agent}...")
+        
+        final_state = event
+    
+    return final_state
 
 
-async def run_orchestration(state: OrchestrationState) -> None:
-    """Execute the orchestration workflow."""
-    console.print(f"[bold]Repository:[/bold] {state['repo']}")
-    console.print(f"[bold]Mode:[/bold] {state['mode']}")
-    if state.get("issue_number"):
-        console.print(f"[bold]Issue:[/bold] #{state['issue_number']}")
-    if state.get("pr_number"):
-        console.print(f"[bold]PR:[/bold] #{state['pr_number']}")
+def display_results(state: OrchestrationState) -> None:
+    """Display workflow results."""
+    console.print("\n[bold cyan]Results[/bold cyan]\n")
+    
+    # Agent results table
+    if state.get("agent_results"):
+        table = Table(title="Agent Execution")
+        table.add_column("Agent", style="cyan")
+        table.add_column("Status", style="green")
+        table.add_column("Output", style="white")
+        
+        for result in state["agent_results"]:
+            table.add_row(
+                result["agent"],
+                result["status"],
+                result["output"][:100] + "..." if len(result["output"]) > 100 else result["output"],
+            )
+        
+        console.print(table)
+        console.print()
+    
+    # Artifacts
+    if state.get("branches_created"):
+        console.print(f"Branches created: {', '.join(state['branches_created'])}")
+    
+    if state.get("prs_created"):
+        console.print(f"PRs created: {', '.join(f'#{pr}' for pr in state['prs_created'])}")
+    
+    if state.get("approval_status"):
+        status_color = "green" if state["approval_status"] == "approved" else "yellow"
+        console.print(f"\nReview status: [{status_color}]{state['approval_status']}[/{status_color}]")
+    
     console.print()
-
-    try:
-        # Create graph
-        graph = create_orchestration_graph()
-        config = {"configurable": {"thread_id": "cli-" + datetime.now().strftime("%Y%m%d-%H%M%S")}}
-
-        # Execute with progress tracking
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            task = progress.add_task("[cyan]Starting orchestration...", total=None)
-
-            async for event in graph.astream(state, config):
-                # Update progress based on current agent
-                current_agent = event.get("current_agent")
-                if current_agent:
-                    progress.update(task, description=f"[cyan]Running {current_agent.value} agent...")
-
-            progress.update(task, description="[green]✅ Orchestration complete")
-
-        # Display results
-        console.print("\n[bold green]✅ Workflow Complete![/bold green]\n")
-        display_results(event)
-
-    except Exception as e:
-        console.print(f"\n[bold red]❌ Orchestration failed:[/bold red] {e}\n")
-        raise typer.Exit(1)
-
-
-def display_results(final_state: dict) -> None:
-    """Display workflow results in a formatted table."""
-    table = Table(title="Orchestration Results", show_header=True, header_style="bold cyan")
-    table.add_column("Metric", style="cyan")
-    table.add_column("Value", style="green")
-
-    # Add key metrics
-    if final_state.get("plan"):
-        table.add_row("Tasks Planned", str(len(final_state.get("tasks", []))))
-
-    if final_state.get("files_changed"):
-        table.add_row("Files Changed", str(len(final_state["files_changed"])))
-
-    if final_state.get("prs_created"):
-        for pr_num in final_state["prs_created"]:
-            table.add_row("PR Created", f"#{pr_num}")
-
-    if final_state.get("test_results"):
-        test_results = final_state["test_results"]
-        table.add_row(
-            "Tests",
-            f"{test_results.get('passed', 0)}/{test_results.get('total', 0)} passed",
-        )
-
-    if final_state.get("approval_status"):
-        table.add_row("Review Status", final_state["approval_status"])
-
-    console.print(table)
 
 
 @app.command()
 def version() -> None:
     """Show version information."""
-    console.print("[bold]AI Orchestration Platform[/bold] v0.1.0")
-    console.print("Built with LangGraph, Perplexity MCP, and GitHub integration")
+    console.print("[bold cyan]AI Orchestration Platform[/bold cyan]")
+    console.print("Version: [bold]0.1.0[/bold]")
 
 
 if __name__ == "__main__":

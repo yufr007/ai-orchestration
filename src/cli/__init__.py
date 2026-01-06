@@ -1,1 +1,1 @@
-"""CLI tools for orchestration platform."""
+"""CLI interface for orchestration platform."""

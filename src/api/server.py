@@ -1,4 +1,4 @@
-"""FastAPI server for orchestration platform."""
+"""FastAPI server for AI orchestration platform."""
 
 import asyncio
 import uuid
@@ -21,59 +21,37 @@ app = FastAPI(
 )
 
 
-# In-memory job store (in production, use database)
+# In-memory job storage (in production, use database)
 jobs: dict[str, dict[str, Any]] = {}
 
 
 class JobRequest(BaseModel):
-    """Request to create an orchestration job."""
+    """Request to create a new orchestration job."""
 
-    repo: str = Field(..., description="Repository in format 'owner/repo'")
+    repo: str = Field(..., description="Repository name (owner/repo)")
     issue_number: int | None = Field(None, description="GitHub issue number")
     pr_number: int | None = Field(None, description="GitHub PR number")
     spec_content: str | None = Field(None, description="Specification content")
-    mode: str = Field(default="autonomous", description="Mode: autonomous, plan, or review")
-    max_retries: int = Field(default=3, description="Maximum retry attempts")
+    mode: str = Field("autonomous", description="Mode: autonomous, plan, or review")
 
 
 class JobResponse(BaseModel):
-    """Response for job operations."""
+    """Response containing job details."""
 
     job_id: str
     status: str
     repo: str
     mode: str
-    created_at: datetime
-    updated_at: datetime
+    created_at: str
+    completed_at: str | None = None
     result: dict[str, Any] | None = None
     error: str | None = None
 
 
-async def run_orchestration(job_id: str, initial_state: OrchestrationState) -> None:
-    """Run orchestration workflow in background."""
-    try:
-        jobs[job_id]["status"] = "running"
-        jobs[job_id]["updated_at"] = datetime.now()
-
-        # Create and run graph
-        graph = create_orchestration_graph()
-        config = {"configurable": {"thread_id": job_id}}
-
-        # Stream execution
-        async for event in graph.astream(initial_state, config):
-            # Store latest state in job
-            jobs[job_id]["state"] = event
-            jobs[job_id]["updated_at"] = datetime.now()
-
-        # Mark as completed
-        jobs[job_id]["status"] = "completed"
-        jobs[job_id]["result"] = event
-        jobs[job_id]["updated_at"] = datetime.now()
-
-    except Exception as e:
-        jobs[job_id]["status"] = "failed"
-        jobs[job_id]["error"] = str(e)
-        jobs[job_id]["updated_at"] = datetime.now()
+@app.get("/health")
+async def health_check() -> dict[str, str]:
+    """Health check endpoint."""
+    return {"status": "healthy", "service": "ai-orchestration", "version": "0.1.0"}
 
 
 @app.get("/")
@@ -82,28 +60,45 @@ async def root() -> dict[str, str]:
     return {
         "service": "AI Orchestration Platform",
         "version": "0.1.0",
-        "status": "operational",
+        "docs": "/docs",
+        "health": "/health",
     }
 
 
-@app.get("/health")
-async def health() -> dict[str, str]:
-    """Health check endpoint."""
-    settings = get_settings()
-    return {
-        "status": "healthy",
-        "environment": settings.environment,
-        "timestamp": datetime.now().isoformat(),
-    }
+async def run_orchestration(job_id: str, state: OrchestrationState) -> None:
+    """Background task to run orchestration workflow."""
+    try:
+        jobs[job_id]["status"] = "running"
+        
+        # Create and run graph
+        graph = create_orchestration_graph()
+        
+        config = {"configurable": {"thread_id": job_id}}
+        
+        final_state = None
+        async for event in graph.astream(state, config):
+            # Update job with latest event
+            jobs[job_id]["events"] = jobs[job_id].get("events", []) + [event]
+            final_state = event
+        
+        # Job completed successfully
+        jobs[job_id]["status"] = "completed"
+        jobs[job_id]["completed_at"] = datetime.now().isoformat()
+        jobs[job_id]["result"] = final_state
+        
+    except Exception as e:
+        jobs[job_id]["status"] = "failed"
+        jobs[job_id]["error"] = str(e)
+        jobs[job_id]["completed_at"] = datetime.now().isoformat()
 
 
 @app.post("/api/v1/jobs", response_model=JobResponse)
 async def create_job(request: JobRequest, background_tasks: BackgroundTasks) -> JobResponse:
-    """Create and start an orchestration job."""
+    """Create a new orchestration job."""
     job_id = str(uuid.uuid4())
-
+    
     # Create initial state
-    initial_state: OrchestrationState = {
+    state: OrchestrationState = {
         "repo": request.repo,
         "issue_number": request.issue_number,
         "pr_number": request.pr_number,
@@ -123,35 +118,34 @@ async def create_job(request: JobRequest, background_tasks: BackgroundTasks) -> 
         "current_agent": None,
         "next_agents": [],
         "retry_count": 0,
-        "max_retries": request.max_retries,
+        "max_retries": 3,
         "started_at": datetime.now(),
         "completed_at": None,
         "error": None,
     }
-
+    
     # Store job
     jobs[job_id] = {
-        "id": job_id,
+        "job_id": job_id,
         "status": "pending",
         "repo": request.repo,
         "mode": request.mode,
-        "created_at": datetime.now(),
-        "updated_at": datetime.now(),
-        "state": initial_state,
+        "created_at": datetime.now().isoformat(),
+        "completed_at": None,
         "result": None,
         "error": None,
+        "events": [],
     }
-
-    # Start orchestration in background
-    background_tasks.add_task(run_orchestration, job_id, initial_state)
-
+    
+    # Start background task
+    background_tasks.add_task(run_orchestration, job_id, state)
+    
     return JobResponse(
         job_id=job_id,
         status="pending",
         repo=request.repo,
         mode=request.mode,
         created_at=jobs[job_id]["created_at"],
-        updated_at=jobs[job_id]["updated_at"],
     )
 
 
@@ -160,15 +154,16 @@ async def get_job(job_id: str) -> JobResponse:
     """Get job status and results."""
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
-
+    
     job = jobs[job_id]
+    
     return JobResponse(
-        job_id=job["id"],
+        job_id=job_id,
         status=job["status"],
         repo=job["repo"],
         mode=job["mode"],
         created_at=job["created_at"],
-        updated_at=job["updated_at"],
+        completed_at=job.get("completed_at"),
         result=job.get("result"),
         error=job.get("error"),
     )
@@ -179,44 +174,46 @@ async def list_jobs() -> list[JobResponse]:
     """List all jobs."""
     return [
         JobResponse(
-            job_id=job["id"],
+            job_id=job_id,
             status=job["status"],
             repo=job["repo"],
             mode=job["mode"],
             created_at=job["created_at"],
-            updated_at=job["updated_at"],
-            result=job.get("result"),
+            completed_at=job.get("completed_at"),
             error=job.get("error"),
         )
-        for job in jobs.values()
+        for job_id, job in jobs.items()
     ]
 
 
 @app.get("/api/v1/jobs/{job_id}/stream")
 async def stream_job_logs(job_id: str) -> StreamingResponse:
-    """Stream job execution logs in real-time."""
+    """Stream job events in real-time."""
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
-
+    
     async def event_generator() -> Any:
-        """Generate SSE events for job updates."""
-        last_update = jobs[job_id]["updated_at"]
-
-        while jobs[job_id]["status"] in ["pending", "running"]:
-            current_update = jobs[job_id]["updated_at"]
-
-            if current_update > last_update:
-                state = jobs[job_id].get("state", {})
-                current_agent = state.get("current_agent")
-
-                yield f"data: {{\"agent\": \"{current_agent}\", \"status\": \"{jobs[job_id]['status']}\"}}\n\n"
-                last_update = current_update
-
+        last_event_idx = 0
+        while True:
+            job = jobs.get(job_id)
+            if not job:
+                break
+            
+            events = job.get("events", [])
+            new_events = events[last_event_idx:]
+            
+            for event in new_events:
+                yield f"data: {event}\n\n"
+            
+            last_event_idx = len(events)
+            
+            # Check if job is done
+            if job["status"] in ["completed", "failed"]:
+                yield f"data: {{\"status\": \"{job['status']}\", \"done\": true}}\n\n"
+                break
+            
             await asyncio.sleep(1)
-
-        # Send final status
-        yield f"data: {{\"status\": \"{jobs[job_id]['status']}\", \"completed\": true}}\n\n"
-
+    
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
@@ -225,7 +222,7 @@ async def delete_job(job_id: str) -> dict[str, str]:
     """Delete a job."""
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
-
+    
     del jobs[job_id]
     return {"message": "Job deleted", "job_id": job_id}
 

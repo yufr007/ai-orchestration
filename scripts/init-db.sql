@@ -1,107 +1,79 @@
--- PostgreSQL initialization script for AI Orchestration Platform
--- This runs automatically in Docker Compose
+-- PostgreSQL initialization script
+-- This runs when the database container starts
 
--- Enable extensions
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE EXTENSION IF NOT EXISTS "pg_trgm";  -- For text search
-
--- Orchestration runs table
-CREATE TABLE IF NOT EXISTS orchestration_runs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+-- Jobs table
+CREATE TABLE IF NOT EXISTS jobs (
+    id VARCHAR(36) PRIMARY KEY,
     repo VARCHAR(255) NOT NULL,
     issue_number INTEGER,
     pr_number INTEGER,
     mode VARCHAR(50) NOT NULL,
     status VARCHAR(50) NOT NULL,
-    started_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP,
     error TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    INDEX idx_repo (repo),
+    INDEX idx_status (status),
+    INDEX idx_created_at (created_at)
 );
 
--- Agent executions table
-CREATE TABLE IF NOT EXISTS agent_executions (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    run_id UUID NOT NULL,
-    agent_role VARCHAR(50) NOT NULL,
+-- Agent results table
+CREATE TABLE IF NOT EXISTS agent_results (
+    id SERIAL PRIMARY KEY,
+    job_id VARCHAR(36) NOT NULL,
+    agent VARCHAR(50) NOT NULL,
     status VARCHAR(50) NOT NULL,
     output TEXT,
     artifacts JSONB,
     metadata JSONB,
-    started_at TIMESTAMP NOT NULL,
-    completed_at TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (run_id) REFERENCES orchestration_runs(id) ON DELETE CASCADE
+    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+    INDEX idx_job_id (job_id),
+    INDEX idx_agent (agent),
+    INDEX idx_timestamp (timestamp)
 );
 
--- Tasks table (decomposed from plans)
-CREATE TABLE IF NOT EXISTS tasks (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    run_id UUID NOT NULL,
-    task_number INTEGER NOT NULL,
-    description TEXT NOT NULL,
-    owner VARCHAR(50) NOT NULL,
-    status VARCHAR(50) NOT NULL,
-    dependencies INTEGER[],
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    completed_at TIMESTAMP,
-    FOREIGN KEY (run_id) REFERENCES orchestration_runs(id) ON DELETE CASCADE
+-- Checkpoints table (for LangGraph persistence)
+CREATE TABLE IF NOT EXISTS checkpoints (
+    thread_id VARCHAR(255) NOT NULL,
+    checkpoint_id VARCHAR(255) NOT NULL,
+    parent_id VARCHAR(255),
+    checkpoint BYTEA NOT NULL,
+    metadata JSONB,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (thread_id, checkpoint_id),
+    INDEX idx_thread_id (thread_id),
+    INDEX idx_parent_id (parent_id)
 );
 
--- Files changed tracking
-CREATE TABLE IF NOT EXISTS file_changes (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    run_id UUID NOT NULL,
-    file_path VARCHAR(500) NOT NULL,
-    change_type VARCHAR(20) NOT NULL,  -- created, updated, deleted
-    branch VARCHAR(255),
-    commit_sha VARCHAR(40),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (run_id) REFERENCES orchestration_runs(id) ON DELETE CASCADE
+-- Metrics table (for observability)
+CREATE TABLE IF NOT EXISTS metrics (
+    id SERIAL PRIMARY KEY,
+    job_id VARCHAR(36),
+    metric_name VARCHAR(100) NOT NULL,
+    metric_value NUMERIC,
+    labels JSONB,
+    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_job_id (job_id),
+    INDEX idx_metric_name (metric_name),
+    INDEX idx_timestamp (timestamp)
 );
 
--- Test results tracking
-CREATE TABLE IF NOT EXISTS test_results (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    run_id UUID NOT NULL,
-    test_file VARCHAR(500) NOT NULL,
-    test_name VARCHAR(255) NOT NULL,
-    status VARCHAR(20) NOT NULL,  -- passed, failed, skipped
-    error TEXT,
-    duration_ms INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (run_id) REFERENCES orchestration_runs(id) ON DELETE CASCADE
-);
+-- Create views for analytics
+CREATE OR REPLACE VIEW job_statistics AS
+SELECT 
+    status,
+    COUNT(*) as count,
+    AVG(EXTRACT(EPOCH FROM (completed_at - created_at))) as avg_duration_seconds
+FROM jobs
+WHERE completed_at IS NOT NULL
+GROUP BY status;
 
--- Create indexes
-CREATE INDEX IF NOT EXISTS idx_runs_repo ON orchestration_runs(repo);
-CREATE INDEX IF NOT EXISTS idx_runs_status ON orchestration_runs(status);
-CREATE INDEX IF NOT EXISTS idx_runs_created ON orchestration_runs(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_executions_run ON agent_executions(run_id);
-CREATE INDEX IF NOT EXISTS idx_executions_agent ON agent_executions(agent_role);
-CREATE INDEX IF NOT EXISTS idx_tasks_run ON tasks(run_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-CREATE INDEX IF NOT EXISTS idx_files_run ON file_changes(run_id);
-CREATE INDEX IF NOT EXISTS idx_tests_run ON test_results(run_id);
-CREATE INDEX IF NOT EXISTS idx_tests_status ON test_results(status);
-
--- Create updated_at trigger
-CREATE OR REPLACE FUNCTION update_updated_at_column()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = CURRENT_TIMESTAMP;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER update_orchestration_runs_updated_at
-    BEFORE UPDATE ON orchestration_runs
-    FOR EACH ROW
-    EXECUTE FUNCTION update_updated_at_column();
-
--- Insert sample data (for testing)
-INSERT INTO orchestration_runs (repo, mode, status, started_at) VALUES
-    ('yufr007/vitaflow', 'autonomous', 'completed', NOW() - INTERVAL '1 day'),
-    ('yufr007/autom8', 'plan', 'completed', NOW() - INTERVAL '2 hours')
-ON CONFLICT DO NOTHING;
+CREATE OR REPLACE VIEW agent_performance AS
+SELECT 
+    agent,
+    status,
+    COUNT(*) as executions,
+    AVG(LENGTH(output)) as avg_output_length
+FROM agent_results
+GROUP BY agent, status;

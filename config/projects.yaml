@@ -1,33 +1,27 @@
-# Project-specific configurations
-# Map repositories to specific settings and agents
+# Project mappings
+# Configure target repositories and their agent teams
 
 projects:
   vitaflow:
     repo: yufr007/vitaflow
     branch: main
     specs_dir: docs/specs
-    language: typescript
-    framework: nextjs
+    description: "Digital health platform"
     agents:
       - planner
       - coder
       - tester
       - reviewer
     settings:
+      auto_deploy: false
+      require_human_review: true
       min_test_coverage: 80
-      auto_format: true
-      style_guide: airbnb
-    gates:
-      - tests_pass
-      - review_approved
-      - no_security_issues
-
+    
   autom8:
     repo: yufr007/autom8
     branch: develop
     specs_dir: specs
-    language: python
-    framework: fastapi
+    description: "Automation platform"
     agents:
       - planner
       - coder
@@ -36,47 +30,36 @@ projects:
       - security
       - reviewer
     settings:
+      auto_deploy: false
+      require_human_review: true
       min_test_coverage: 85
-      auto_format: true
-      style_guide: black
-    gates:
-      - tests_pass
-      - security_scan_pass
-      - review_approved
-      - deployment_validated
-
+      security_scan: true
+    
   ai-orchestration:
     repo: yufr007/ai-orchestration
     branch: main
     specs_dir: docs/specs
-    language: python
-    framework: langgraph
+    description: "This orchestration platform itself"
     agents:
       - planner
       - coder
       - tester
-      - security
       - reviewer
     settings:
-      min_test_coverage: 80
-      auto_format: true
-      style_guide: black
-    gates:
-      - tests_pass
-      - review_approved
+      auto_deploy: false
+      require_human_review: true
+      min_test_coverage: 90
+      dogfooding: true
 
-# Default project settings (used when repo not found above)
+# Default settings for unmapped projects
 default:
   branch: main
-  specs_dir: specs
+  specs_dir: docs
   agents:
     - planner
     - coder
-    - tester
     - reviewer
   settings:
-    min_test_coverage: 70
-    auto_format: false
-  gates:
-    - tests_pass
-    - review_approved
+    auto_deploy: false
+    require_human_review: true
+    min_test_coverage: 75

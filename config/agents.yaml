@@ -1,76 +1,85 @@
-# Agent Configuration
-# Customize behavior of each agent type
+# Agent configuration
+# Customize behavior, models, and tools for each agent
 
 agents:
   planner:
     model: claude-3-5-sonnet-20241022
     temperature: 0.3
-    max_iterations: 3
+    max_tokens: 4000
     tools:
       - perplexity_research
       - github_issues
-      - github_repository
-    prompts:
-      system: "You are an elite Tech Lead creating detailed implementation plans."
-
+      - github_files
+    max_iterations: 3
+    research_depth: standard  # quick, standard, deep
+    
+  architect:
+    model: claude-3-5-sonnet-20241022
+    temperature: 0.2
+    max_tokens: 8000
+    tools:
+      - github_files
+      - perplexity_research
+    max_iterations: 2
+    
   coder:
     model: claude-3-5-sonnet-20241022
     temperature: 0.2
-    max_iterations: 5
-    parallelism: 3  # Max parallel file operations
-    max_files_per_pr: 10
+    max_tokens: 8000
+    parallelism: 3  # Number of concurrent file operations
     tools:
       - github_files
       - github_branches
       - github_pr
-    prompts:
-      system: "You are a Staff Software Engineer implementing production-grade code."
-
+    max_files_per_pr: 10
+    auto_format: true
+    
   tester:
     model: claude-3-5-sonnet-20241022
-    temperature: 0.1  # Low temperature for consistent tests
-    max_iterations: 3
-    min_coverage: 80  # Minimum test coverage percentage
+    temperature: 0.2
+    max_tokens: 6000
     tools:
       - github_files
-      - github_pr_comment
-    prompts:
-      system: "You are a QA Engineer ensuring code quality through comprehensive testing."
-
+      - pytest_runner
+    min_coverage: 80
+    test_frameworks:
+      - pytest
+      - unittest
+    
   reviewer:
     model: claude-3-5-sonnet-20241022
-    temperature: 0.1
-    max_iterations: 2
-    auto_approve: false  # Never auto-approve, always require human review
+    temperature: 0.3
+    max_tokens: 6000
     tools:
       - github_pr
-      - github_pr_review
-    prompts:
-      system: "You are a Senior Engineering Manager performing thorough code review."
-
+      - github_files
+    auto_approve: false  # Require human approval
+    blocking_issues:
+      - security_vulnerability
+      - test_failure
+      - breaking_change
+    
   devops:
     model: claude-3-5-sonnet-20241022
     temperature: 0.2
-    max_iterations: 3
+    max_tokens: 6000
     tools:
-      - github_actions
-      - github_environments
-    prompts:
-      system: "You are an SRE implementing infrastructure and deployment automation."
-
+      - github_files
+      - docker_ops
+    infrastructure_tools:
+      - terraform
+      - docker
+      - kubernetes
+    
   security:
     model: claude-3-5-sonnet-20241022
     temperature: 0.1
-    max_iterations: 2
+    max_tokens: 4000
     tools:
-      - github_security
-      - github_dependencies
-    prompts:
-      system: "You are a Security Engineer identifying and fixing vulnerabilities."
-
-# Global settings
-global:
-  max_concurrent_agents: 5
-  default_timeout: 600  # seconds
-  retry_on_failure: true
-  max_retries: 3
+      - dependency_scanner
+      - secrets_scanner
+      - github_files
+    scanners:
+      - bandit
+      - safety
+      - semgrep

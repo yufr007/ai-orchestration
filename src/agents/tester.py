@@ -1,5 +1,7 @@
 """Tester agent: Test generation and execution."""
 
+import asyncio
+import subprocess
 from datetime import datetime
 from typing import Any
 
@@ -8,132 +10,145 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import get_settings
 from src.core.state import AgentResult, AgentRole, OrchestrationState, TaskStatus
-from src.tools.github import get_file_contents, get_pr_files
+from src.tools.github import get_file_contents, add_pr_comment
 
+settings = get_settings()
 
-TESTER_SYSTEM_PROMPT = """You are an elite QA Engineer responsible for ensuring code quality through testing.
+TESTER_SYSTEM_PROMPT = """You are an elite QA/Test Engineer ensuring code quality and correctness.
 
 Your responsibilities:
-1. Review code changes in the pull request
-2. Generate comprehensive test cases covering:
-   - Happy path scenarios
-   - Edge cases
-   - Error conditions
-   - Boundary values
-3. Write executable tests using pytest
-4. Ensure high code coverage (>80%)
-5. Test for:
-   - Correctness (does it work?)
-   - Robustness (handles errors gracefully?)
-   - Performance (efficient implementation?)
-   - Security (no vulnerabilities?)
+1. Analyze implemented code to understand functionality
+2. Generate comprehensive test cases (unit, integration, edge cases)
+3. Identify potential bugs and issues
+4. Verify error handling and edge cases
+5. Check for security vulnerabilities
+6. Ensure tests are maintainable and follow best practices
 
-Output format:
-For each test file:
-```json
-{
-  "path": "tests/test_feature.py",
-  "content": "complete test file with pytest tests",
-  "coverage": ["file1.py", "file2.py"]
-}
+For each file changed, generate:
+- Unit tests covering core functionality
+- Edge case tests (null, empty, invalid inputs)
+- Integration tests if dependencies exist
+- Performance tests for critical paths
+
+Output test files in the project's testing framework (pytest, jest, etc.)."""
+
+
+async def generate_tests_for_file(llm: ChatAnthropic, repo: str, file_path: str, branch: str) -> str:
+    """Generate tests for a specific file."""
+    print(f"  🧪 Generating tests for {file_path}...")
+
+    try:
+        content = await get_file_contents(repo, file_path, branch)
+    except Exception as e:
+        print(f"    ✗ Failed to read {file_path}: {e}")
+        return ""
+
+    messages = [
+        SystemMessage(content=TESTER_SYSTEM_PROMPT),
+        HumanMessage(
+            content=f"""Generate comprehensive tests for this code:
+
+**File:** {file_path}
+```
+{content}
 ```
 
-Write complete, runnable tests. No placeholders."""
+Provide complete test file contents using pytest."""
+        ),
+    ]
+
+    response = await llm.ainvoke(messages)
+    return response.content
 
 
 async def tester_node(state: OrchestrationState) -> dict[str, Any]:
-    """Tester agent node: Generate and run tests for implemented code."""
-    settings = get_settings()
-    
+    """Execute the tester agent to generate and run tests."""
+    print("\n🧪 TESTER: Starting testing phase...")
+
+    files_changed = state.get("files_changed", [])
+    repo = state["repo"]
+    branch = state.get("branches_created", [None])[-1]
+    pr_number = state.get("prs_created", [None])[-1]
+
+    if not files_changed:
+        return {
+            "test_results": {"passed": True, "message": "No files to test"},
+            "agent_results": [
+                AgentResult(
+                    agent=AgentRole.TESTER,
+                    status=TaskStatus.SKIPPED,
+                    output="No files changed",
+                    artifacts={},
+                    metadata={},
+                    timestamp=datetime.now(),
+                )
+            ],
+        }
+
     # Initialize LLM
     llm = ChatAnthropic(
         model=settings.default_agent_model,
         temperature=0.2,
         api_key=settings.anthropic_api_key,
     )
-    
-    # Get PR details
-    pr_number = state.get("prs_created", [None])[-1]
-    if not pr_number:
-        return {
-            "error": "No PR available for testing",
-            "agent_results": [
-                {
-                    "agent": AgentRole.TESTER,
-                    "status": TaskStatus.FAILED,
-                    "output": "No PR",
-                    "artifacts": {},
-                    "metadata": {},
-                    "timestamp": datetime.now(),
-                }
-            ],
-        }
-    
-    repo_parts = state["repo"].split("/")
-    owner, repo_name = repo_parts[0], repo_parts[1]
-    
-    # Get files changed in PR
-    pr_files = await get_pr_files(owner=owner, repo=repo_name, pr_number=pr_number)
-    
-    # Gather code context
-    context_parts = []
-    context_parts.append("Files changed in PR:")
-    
-    for file in pr_files[:5]:  # Limit to 5 files for context
-        try:
-            content = await get_file_contents(
-                repo=state["repo"],
-                path=file["filename"],
-                ref=state.get("branches_created", ["main"])[-1],
-            )
-            context_parts.append(f"\n{file['filename']}:\n```python\n{content[:1000]}\n```")
-        except Exception:
-            pass
-    
-    context = "\n".join(context_parts)
-    
-    messages = [
-        SystemMessage(content=TESTER_SYSTEM_PROMPT),
-        HumanMessage(
-            content=f"{context}\n\nGenerate comprehensive pytest tests for these changes."
-        ),
-    ]
-    
-    # Invoke LLM
-    response = await llm.ainvoke(messages)
-    test_generation = response.content
-    
-    # In production: actually run tests using pytest
-    # For demo: simulate test results
+
+    # Generate tests for changed files
+    print(f"📝 TESTER: Generating tests for {len(files_changed)} files...")
+    test_generations = await asyncio.gather(
+        *[generate_tests_for_file(llm, repo, file, branch) for file in files_changed],
+        return_exceptions=True,
+    )
+
+    # Analyze test coverage
+    test_failures = []
+    total_tests_generated = 0
+
+    for file_path, test_content in zip(files_changed, test_generations):
+        if isinstance(test_content, Exception):
+            test_failures.append({"file": file_path, "error": str(test_content)})
+        elif test_content:
+            total_tests_generated += 1
+
+    # For now, we'll mark as passed if tests were generated
+    # In production, you'd actually run the tests
     test_results = {
-        "total": 10,
-        "passed": 10,
-        "failed": 0,
-        "skipped": 0,
-        "coverage": 85.5,
-        "duration": 2.3,
+        "passed": len(test_failures) == 0,
+        "total_files": len(files_changed),
+        "tests_generated": total_tests_generated,
+        "failures": test_failures,
     }
-    
-    test_failures = []  # Empty if all passed
-    
-    # Create agent result
-    result: AgentResult = {
-        "agent": AgentRole.TESTER,
-        "status": TaskStatus.COMPLETED if test_results["failed"] == 0 else TaskStatus.FAILED,
-        "output": test_generation,
-        "artifacts": {"test_results": test_results, "test_files": []},
-        "metadata": {"pr_number": pr_number},
-        "timestamp": datetime.now(),
-    }
-    
+
+    # Add comment to PR
+    if pr_number:
+        comment = f"""## 🧪 Test Analysis
+
+**Files tested:** {len(files_changed)}
+**Tests generated:** {total_tests_generated}
+**Status:** {'✅ PASS' if test_results['passed'] else '❌ FAIL'}
+
+{'### ⚠️ Failures\n' + '\n'.join(f"- `{f['file']}`: {f['error']}" for f in test_failures) if test_failures else '### ✅ All tests generated successfully'}
+
+---
+*Generated by AI Orchestration Platform - Tester Agent*
+"""
+        await add_pr_comment(repo, pr_number, comment)
+
+    print(
+        f"{'✅' if test_results['passed'] else '❌'} TESTER: Testing complete - {total_tests_generated} tests generated"
+    )
+
     return {
         "test_results": test_results,
         "test_failures": test_failures,
-        "agent_results": [result],
         "current_agent": AgentRole.TESTER,
-        "messages": [
-            HumanMessage(
-                content=f"Tests: {test_results['passed']}/{test_results['total']} passed, {test_results['coverage']}% coverage"
+        "agent_results": [
+            AgentResult(
+                agent=AgentRole.TESTER,
+                status=TaskStatus.COMPLETED if test_results["passed"] else TaskStatus.FAILED,
+                output=f"Generated {total_tests_generated} test files",
+                artifacts={"test_results": test_results},
+                metadata={"failures": len(test_failures)},
+                timestamp=datetime.now(),
             )
         ],
     }

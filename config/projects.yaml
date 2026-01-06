@@ -1,55 +1,64 @@
-# Project Configuration
-# Map target repositories and their settings
+# Project-specific configurations
 
 projects:
-  vitaflow:
-    repo: yufr007/vitaflow
+  default:
     branch: main
     specs_dir: docs/specs
-    test_dir: tests
     agents:
       - planner
       - coder
       - tester
       - reviewer
-    settings:
-      require_tests: true
-      require_review: true
-      auto_merge: false
-      max_pr_size: 15
+    auto_merge: false
+    require_review: true
+
+  vitaflow:
+    repo: yufr007/vitaflow
+    branch: main
+    specs_dir: docs/specs
+    agents:
+      - planner
+      - coder
+      - tester
+      - reviewer
+    auto_merge: false
+    require_review: true
+    environments:
+      - development
+      - staging
+      - production
 
   autom8:
     repo: yufr007/autom8
     branch: develop
     specs_dir: specs
-    test_dir: tests
     agents:
       - planner
       - coder
       - devops
-      - tester
       - security
-      - reviewer
-    settings:
-      require_tests: true
-      require_review: true
-      require_security_scan: true
-      auto_merge: false
-      max_pr_size: 20
-
-  ai-orchestration:
-    repo: yufr007/ai-orchestration
-    branch: main
-    specs_dir: docs/specs
-    test_dir: tests
-    agents:
-      - planner
-      - coder
       - tester
       - reviewer
-    settings:
-      require_tests: true
-      require_review: true
-      auto_merge: false
-      max_pr_size: 10
-      strict_mode: true
+    auto_merge: false
+    require_review: true
+    environments:
+      - dev
+      - prod
+
+# Environment-specific settings
+environments:
+  development:
+    database: sqlite
+    log_level: DEBUG
+    enable_tracing: true
+
+  staging:
+    database: postgresql
+    log_level: INFO
+    enable_tracing: true
+
+  production:
+    database: postgresql
+    log_level: WARNING
+    enable_tracing: false
+    require_approval: true

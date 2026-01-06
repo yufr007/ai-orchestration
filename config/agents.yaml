@@ -1,107 +1,61 @@
-# Agent Configuration
-# Customize agent behavior, models, and tool access
+# Agent configuration
 
 agents:
   planner:
-    role: "Tech Lead / Architect"
-    model: "claude-3-5-sonnet-20241022"
+    model: claude-3-5-sonnet-20241022
     temperature: 0.3
-    max_iterations: 3
+    max_tokens: 4000
     tools:
       - perplexity_research
-      - perplexity_search
       - github_issues
-      - github_pr_read
-    responsibilities:
-      - Research best practices
-      - Analyze requirements
-      - Create implementation plan
-      - Identify risks and dependencies
+      - github_search
+    max_iterations: 3
+    timeout_seconds: 120
 
   coder:
-    role: "Staff Engineer"
-    model: "claude-3-5-sonnet-20241022"
+    model: claude-3-5-sonnet-20241022
     temperature: 0.2
-    max_iterations: 5
+    max_tokens: 8000
     parallelism: 3
-    max_files_per_pr: 10
     tools:
-      - github_files_read
-      - github_files_write
-      - github_branch_create
-      - github_pr_create
-    responsibilities:
-      - Implement features
-      - Write production-quality code
-      - Follow best practices
-      - Handle errors gracefully
+      - github_files
+      - github_branches
+      - github_pr
+    max_files_per_pr: 10
+    timeout_seconds: 300
 
   tester:
-    role: "QA / Test Engineer"
-    model: "claude-3-5-sonnet-20241022"
+    model: claude-3-5-sonnet-20241022
     temperature: 0.2
-    max_iterations: 3
+    max_tokens: 6000
     tools:
-      - github_files_read
-      - github_pr_comment
-    test_frameworks:
-      python: "pytest"
-      typescript: "jest"
-      go: "testing"
-    responsibilities:
-      - Generate comprehensive tests
-      - Identify edge cases
-      - Verify error handling
-      - Report failures
+      - github_files
+      - test_runner
+    coverage_threshold: 80
+    timeout_seconds: 180
 
   reviewer:
-    role: "Senior Engineer"
-    model: "claude-3-5-sonnet-20241022"
-    temperature: 0.3
-    max_iterations: 2
-    tools:
-      - github_pr_read
-      - github_pr_diff
-      - github_pr_review
-    review_criteria:
-      - correctness
-      - design
-      - complexity
-      - tests
-      - naming
-      - documentation
-      - security
-      - performance
-    responsibilities:
-      - Review code quality
-      - Identify bugs and issues
-      - Suggest improvements
-      - Enforce standards
-
-  devops:
-    role: "SRE / DevOps Engineer"
-    model: "claude-3-5-sonnet-20241022"
+    model: claude-3-5-sonnet-20241022
     temperature: 0.2
-    enabled: false  # Optional agent
+    max_tokens: 6000
     tools:
-      - github_actions
-      - docker_operations
-    responsibilities:
-      - Infrastructure as code
-      - Deployment automation
-      - Environment management
-      - Monitoring setup
+      - github_pr
+      - github_reviews
+    quality_gates:
+      - security_check
+      - performance_check
+      - style_check
+    timeout_seconds: 120
 
-  security:
-    role: "Security Engineer"
-    model: "claude-3-5-sonnet-20241022"
-    temperature: 0.1
-    enabled: false  # Optional agent
-    tools:
-      - github_secrets_scan
-      - dependency_audit
-    responsibilities:
-      - Dependency scanning
-      - Secrets detection
-      - Permission enforcement
-      - Vulnerability assessment
+# Quality thresholds
+quality:
+  min_test_coverage: 80
+  max_complexity: 10
+  max_function_length: 50
+  max_file_length: 500
+
+# Rate limiting
+rate_limits:
+  perplexity_calls_per_hour: 100
+  github_api_calls_per_hour: 5000
+  llm_calls_per_minute: 50

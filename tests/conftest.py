@@ -1,31 +1,53 @@
 """Pytest configuration and fixtures."""
 
-import os
 import pytest
-from datetime import datetime
+from unittest.mock import Mock, AsyncMock
 
 from src.config import Settings
-from src.core.state import OrchestrationState
 
 
 @pytest.fixture
-def test_settings() -> Settings:
-    """Create test settings."""
+def settings() -> Settings:
+    """Mock settings for testing."""
     return Settings(
-        environment="development",
         perplexity_api_key="test-key",
-        github_token="test-token",
-        github_owner="test-owner",
+        perplexity_model="sonar",
         anthropic_api_key="test-anthropic-key",
+        github_token="test-github-token",
+        github_owner="test-owner",
         database_url="sqlite:///:memory:",
+        environment="development",
     )
 
 
 @pytest.fixture
-def initial_state() -> OrchestrationState:
-    """Create initial orchestration state."""
+def mock_github_client():
+    """Mock GitHub client."""
+    client = Mock()
+    repo = Mock()
+    client.get_repo.return_value = repo
+    return client
+
+
+@pytest.fixture
+def mock_perplexity_mcp():
+    """Mock Perplexity MCP."""
+    mcp = AsyncMock()
+    mcp.search.return_value = {
+        "content": "Test research content",
+        "citations": [],
+    }
+    return mcp
+
+
+@pytest.fixture
+def sample_orchestration_state():
+    """Sample orchestration state for testing."""
+    from datetime import datetime
+    from src.core.state import OrchestrationState
+
     return OrchestrationState(
-        repo="test-owner/test-repo",
+        repo="test/repo",
         issue_number=123,
         pr_number=None,
         spec_content=None,
@@ -49,12 +71,3 @@ def initial_state() -> OrchestrationState:
         completed_at=None,
         error=None,
     )
-
-
-@pytest.fixture(autouse=True)
-def mock_env_vars(monkeypatch):
-    """Mock environment variables for tests."""
-    monkeypatch.setenv("PERPLEXITY_API_KEY", "test-key")
-    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
-    monkeypatch.setenv("GITHUB_OWNER", "test-owner")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")

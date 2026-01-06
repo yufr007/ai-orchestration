@@ -1,5 +1,5 @@
-"""FastAPI server for orchestration API."""
+"""FastAPI REST API for orchestration platform."""
 
-from src.api.server import app
+from .server import app
 
 __all__ = ["app"]

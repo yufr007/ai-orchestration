@@ -1,256 +1,215 @@
-"""Coder agent - Implementation and file operations."""
+"""Coder agent - implements features and creates PRs."""
 
 import asyncio
-from datetime import datetime
 from typing import Any
 
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
-
-from src.config import get_settings
-from src.core.state import AgentResult, AgentRole, OrchestrationState, TaskStatus
-from src.tools.github_tools import (
+from src.agents.base import BaseAgent
+from src.core.state import OrchestrationState, AgentRole
+from src.tools.github import (
     create_branch,
+    get_file_contents,
     create_or_update_file,
     create_pull_request,
-    get_file_contents,
+    list_repository_files,
 )
 
 
-CODER_SYSTEM_PROMPT = """You are an elite Staff Software Engineer at a Silicon Valley startup.
+class CoderAgent(BaseAgent):
+    """Implements code changes based on plan."""
 
-Your role:
-- Implement features based on task specifications
-- Write clean, production-grade code following best practices
-- Create comprehensive tests alongside implementation
-- Follow existing code patterns and architecture
-- Document complex logic with clear comments
+    def __init__(self):
+        super().__init__(role=AgentRole.CODER, temperature=0.2)
 
-Guidelines:
-- Always read existing code before making changes
-- Maintain consistency with the existing codebase
-- Write self-documenting code with meaningful names
-- Include error handling and edge cases
-- Add inline comments only for non-obvious logic
-- Ensure code is testable and modular
+    def get_system_prompt(self) -> str:
+        return """You are an elite Staff Software Engineer implementing production-grade code.
 
-Output:
-- Complete, production-ready file contents
-- No placeholders, TODOs, or partial implementations
-- Full files, not diffs or snippets
-"""
+Your responsibilities:
+1. Implement tasks according to the plan with precision
+2. Write clean, maintainable, well-documented code
+3. Follow existing code patterns and conventions
+4. Handle edge cases and errors gracefully
+5. Add appropriate logging and type hints
+6. Write self-explanatory code with minimal comments
 
+Output format:
+For each file, provide COMPLETE file content (not snippets or patches) as JSON:
+{
+  "files": [
+    {
+      "path": "src/module/file.py",
+      "content": "<COMPLETE FILE CONTENT>",
+      "action": "create|update",
+      "message": "Brief description of changes"
+    }
+  ]
+}
 
-async def coder_node(state: OrchestrationState) -> dict[str, Any]:
-    """Coder agent: Implement tasks and create PR."""
-    settings = get_settings()
-    repo = state["repo"]
-    tasks = state.get("tasks", [])
-    plan = state.get("plan")
+IMPORTANT:
+- Provide FULL file content, not partial changes
+- Maintain existing imports and structure if updating
+- Ensure syntax correctness
+- Follow Python/project conventions (Black formatting, type hints, docstrings)"""
 
-    if not tasks:
-        return {
-            "agent_results": state.get("agent_results", [])
-            + [
-                {
-                    "agent": AgentRole.CODER,
-                    "status": TaskStatus.SKIPPED,
-                    "output": "No tasks to implement",
-                    "artifacts": {},
-                    "metadata": {},
-                    "timestamp": datetime.now(),
-                }
-            ],
-            "current_agent": AgentRole.CODER,
-        }
-
-    try:
-        # Initialize LLM
-        llm = ChatAnthropic(
-            model=settings.default_agent_model,
-            temperature=0.2,  # Lower for consistent code generation
-            api_key=settings.anthropic_api_key,
-        )
-
-        # Create feature branch
-        branch_name = f"feature/ai-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        await create_branch(repo, branch_name)
-
-        files_changed = []
+    async def execute(self, state: OrchestrationState) -> dict[str, Any]:
+        """Execute coding workflow."""
+        repo = state["repo"]
+        plan = state.get("plan")
+        tasks = state.get("tasks", [])
         retry_count = state.get("retry_count", 0)
 
-        # Process tasks (in production, could parallelize with asyncio.gather)
+        if not tasks:
+            return {
+                "output": "No tasks to implement",
+                "artifacts": {},
+                "metadata": {"status": "skipped"},
+            }
+
+        # Create feature branch
+        base_branch = "main"
+        feature_branch = f"feat/ai-generated-{plan['summary'][:30].replace(' ', '-').lower()}"
+        branch_created = await create_branch(repo, feature_branch, base_branch)
+
+        if not branch_created:
+            # Branch might already exist from retry
+            self.logger.info(f"Branch {feature_branch} already exists, reusing")
+
+        # Get existing files that need to be modified
+        existing_files = {}
         for task in tasks:
-            if task.get("status") == "completed":
-                continue
+            for file_path in task.get("files", []):
+                if file_path not in existing_files:
+                    content = await get_file_contents(repo, file_path, ref=feature_branch)
+                    if content:
+                        existing_files[file_path] = content
 
-            # Get context for this task
-            task_context = f"""
-# Task
-{task['description']}
+        # Generate implementation for all tasks
+        tasks_description = "\n\n".join(
+            [
+                f"Task {t['id']}: {t['title']}\n"
+                f"Type: {t['type']}\n"
+                f"Files: {', '.join(t['files'])}\n"
+                f"Acceptance: {', '.join(t['acceptance_criteria'])}"
+                for t in tasks
+            ]
+        )
 
-# Plan Context
-{plan.get('content', '') if plan else 'No plan available'}
+        user_message = f"""Implement the following tasks:
 
-# Previous Failures (Retry {retry_count})
-{get_failure_context(state) if retry_count > 0 else 'First attempt'}
-"""
+{tasks_description}
 
-            # Determine which files to modify (simplified - production would be smarter)
-            # For now, ask LLM to identify files
-            file_identification = await llm.ainvoke(
-                [
-                    SystemMessage(content="You are a code architect."),
-                    HumanMessage(
-                        content=f"""Given this task, list the EXACT file paths that need to be created or modified.
+Plan Summary: {plan['summary']}
+Approach: {plan['approach']}
 
-{task_context}
+Existing Files:
+{self._format_existing_files(existing_files)}
 
-Return ONLY file paths, one per line, no explanations.
-Example:
-src/api/routes.py
-src/models/user.py
-tests/test_user.py
-"""
-                    ),
-                ]
+Generate COMPLETE file content for all files that need to be created or modified.
+Return JSON with the 'files' array as specified."""
+
+        if retry_count > 0:
+            # Include test failure information if retrying
+            test_failures = state.get("test_failures", [])
+            review_comments = state.get("review_comments", [])
+            user_message += f"\n\nPrevious Issues (Retry #{retry_count}):\n"
+            if test_failures:
+                user_message += f"Test Failures: {test_failures}\n"
+            if review_comments:
+                user_message += f"Review Comments: {review_comments}\n"
+
+        implementation_json = await self._call_llm(self.get_system_prompt(), user_message)
+
+        # Parse implementation
+        import json
+
+        try:
+            if "```json" in implementation_json:
+                implementation_json = (
+                    implementation_json.split("```json")[1].split("```")[0].strip()
+                )
+            elif "```" in implementation_json:
+                implementation_json = implementation_json.split("```")[1].split("```")[0].strip()
+
+            implementation = json.loads(implementation_json)
+            files_to_commit = implementation.get("files", [])
+        except json.JSONDecodeError:
+            self.logger.error("Failed to parse implementation JSON")
+            return {
+                "output": "Failed to parse implementation",
+                "artifacts": {"raw_response": implementation_json},
+                "metadata": {"status": "failed"},
+            }
+
+        # Commit files to branch
+        files_changed = []
+        commit_tasks = []
+        for file_spec in files_to_commit:
+            path = file_spec["path"]
+            content = file_spec["content"]
+            message = file_spec.get("message", f"Implement {path}")
+
+            commit_tasks.append(
+                create_or_update_file(repo, path, content, message, branch=feature_branch)
             )
+            files_changed.append(path)
 
-            file_paths = [line.strip() for line in file_identification.content.split("\n") if line.strip()]
+        # Execute commits in parallel
+        await asyncio.gather(*commit_tasks)
 
-            # Implement each file
-            for file_path in file_paths:
-                # Get existing content if file exists
-                existing_content = ""
-                try:
-                    existing_content = await get_file_contents(repo, file_path, branch_name)
-                except Exception:
-                    existing_content = "# New file"
+        # Create PR
+        pr_title = f"[AI] {plan['summary']}"
+        pr_body = f"""## Implementation Plan
 
-                # Generate new content
-                implementation = await llm.ainvoke(
-                    [
-                        SystemMessage(content=CODER_SYSTEM_PROMPT),
-                        HumanMessage(
-                            content=f"""Implement the complete file content for:
-
-**File**: {file_path}
-
-**Task**: {task['description']}
-
-**Plan Context**:
-{plan.get('content', '')[:1000] if plan else ''}
-
-**Existing Content**:
-```
-{existing_content}
-```
-
-**Instructions**:
-- Provide COMPLETE file content (not a diff)
-- Include all necessary imports
-- Add comprehensive error handling
-- Follow existing patterns
-- Include docstrings and type hints
-- No TODOs or placeholders
-
-Output the full file content only, no explanations.
-"""
-                        ),
-                    ]
-                )
-
-                # Write file to branch
-                await create_or_update_file(
-                    repo=repo,
-                    path=file_path,
-                    content=implementation.content,
-                    branch=branch_name,
-                    message=f"Implement: {task['description'][:50]}",
-                )
-
-                files_changed.append(file_path)
-
-            # Mark task as completed
-            task["status"] = "completed"
-
-        # Create pull request
-        pr_title = f"AI Implementation: {tasks[0]['description'][:60]}" if tasks else "AI Implementation"
-        pr_body = f"""
-## Summary
-Automated implementation by AI orchestration system.
+{plan['approach']}
 
 ## Tasks Completed
-{chr(10).join(f"- {task['description']}" for task in tasks)}
 
-## Plan
-{plan.get('content', 'No plan')[:500] if plan else 'No plan'}
+{chr(10).join([f"- {t['title']}" for t in tasks])}
 
 ## Files Changed
-{chr(10).join(f"- `{file}`" for file in files_changed)}
+
+{chr(10).join([f"- `{f}`" for f in files_changed])}
+
+## Notes
+
+{plan.get('research_notes', 'N/A')}
 
 ---
 *Generated by AI Orchestration Platform*
 """
 
         pr_number = await create_pull_request(
-            repo=repo,
-            title=pr_title,
-            body=pr_body,
-            head=branch_name,
-            base="main",
+            repo, feature_branch, base_branch, pr_title, pr_body
         )
 
-        agent_result: AgentResult = {
-            "agent": AgentRole.CODER,
-            "status": TaskStatus.COMPLETED,
+        return {
             "output": f"Created PR #{pr_number} with {len(files_changed)} files",
+            "files_changed": files_changed,
+            "branches_created": state.get("branches_created", []) + [feature_branch],
+            "prs_created": state.get("prs_created", []) + [pr_number],
+            "retry_count": retry_count + 1,
             "artifacts": {
-                "branch": branch_name,
                 "pr_number": pr_number,
-                "files_changed": files_changed,
+                "pr_url": f"https://github.com/{repo}/pull/{pr_number}",
+                "branch": feature_branch,
             },
             "metadata": {
-                "task_count": len(tasks),
-                "retry_count": retry_count,
+                "files_count": len(files_changed),
+                "tasks_implemented": len(tasks),
             },
-            "timestamp": datetime.now(),
         }
 
-        return {
-            "files_changed": files_changed,
-            "branches_created": state.get("branches_created", []) + [branch_name],
-            "prs_created": state.get("prs_created", []) + [pr_number],
-            "agent_results": state.get("agent_results", []) + [agent_result],
-            "current_agent": AgentRole.CODER,
-            "next_agents": [AgentRole.TESTER],
-        }
+    def _format_existing_files(self, files: dict[str, str]) -> str:
+        """Format existing file contents for context."""
+        if not files:
+            return "No existing files (all new files)"
 
-    except Exception as e:
-        agent_result: AgentResult = {
-            "agent": AgentRole.CODER,
-            "status": TaskStatus.FAILED,
-            "output": f"Implementation failed: {str(e)}",
-            "artifacts": {},
-            "metadata": {"error": str(e)},
-            "timestamp": datetime.now(),
-        }
-
-        return {
-            "agent_results": state.get("agent_results", []) + [agent_result],
-            "error": str(e),
-            "current_agent": AgentRole.CODER,
-        }
+        result = []
+        for path, content in files.items():
+            result.append(f"--- {path} ---\n{content[:1000]}...\n")
+        return "\n".join(result)
 
 
-def get_failure_context(state: OrchestrationState) -> str:
-    """Extract context from previous test failures for retry."""
-    failures = state.get("test_failures", [])
-    if not failures:
-        return "No previous failures"
-
-    context = "Previous test failures to address:\n\n"
-    for failure in failures[-3:]:  # Last 3 failures
-        context += f"- {failure.get('test_name', 'Unknown')}: {failure.get('message', 'No message')}\n"
-
-    return context
+async def coder_node(state: OrchestrationState) -> dict[str, Any]:
+    """LangGraph node for coder agent."""
+    agent = CoderAgent()
+    return await agent.invoke(state)

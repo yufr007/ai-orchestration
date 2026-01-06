@@ -1,0 +1,68 @@
+version: '3.9'
+
+services:
+  orchestration:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-orchestration
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://orchestration:orchestration@postgres:5432/orchestration
+    env_file:
+      - .env
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./checkpoints:/app/checkpoints
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - orchestration-network
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: orchestration-db
+    environment:
+      POSTGRES_USER: orchestration
+      POSTGRES_PASSWORD: orchestration
+      POSTGRES_DB: orchestration
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orchestration"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - orchestration-network
+    restart: unless-stopped
+
+  langsmith-proxy:
+    image: langchain/langsmith-proxy:latest
+    container_name: langsmith-proxy
+    environment:
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY}
+    ports:
+      - "8001:8000"
+    networks:
+      - orchestration-network
+    restart: unless-stopped
+    profiles:
+      - observability
+
+volumes:
+  postgres-data:
+    driver: local
+
+networks:
+  orchestration-network:
+    driver: bridge

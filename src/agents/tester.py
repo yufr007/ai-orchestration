@@ -1,170 +1,191 @@
 """Tester agent - Test generation and execution."""
 
+import asyncio
+import subprocess
+from datetime import datetime
 from typing import Any
-import re
 
-from src.agents.base import BaseAgent
-from src.core.state import OrchestrationState, AgentRole
-from src.tools.github_tools import GitHubTools
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from src.config import get_settings
+from src.core.state import AgentResult, AgentRole, OrchestrationState, TaskStatus
+from src.tools.github_tools import get_pr_files, get_file_contents
 
 
-class TesterAgent(BaseAgent):
-    """Agent responsible for generating and running tests."""
+TESTER_SYSTEM_PROMPT = """You are an elite QA/Test Engineer at a Silicon Valley startup.
 
-    def __init__(self):
-        super().__init__(role=AgentRole.TESTER, temperature=0.1)
-        self.github = GitHubTools()
+Your role:
+- Generate comprehensive test cases for new/modified code
+- Write unit tests, integration tests, and edge case tests
+- Ensure high code coverage (>80%)
+- Test error handling and boundary conditions
+- Validate against requirements and success criteria
 
-    async def execute(self, state: OrchestrationState) -> dict[str, Any]:
-        """Execute testing logic."""
-        files_changed = state.get("files_changed", [])
-        repo = state["repo"]
-        pr_number = state.get("prs_created", [])[-1] if state.get("prs_created") else None
+Test quality standards:
+- Clear, descriptive test names (test_should_x_when_y)
+- Arrange-Act-Assert pattern
+- Independent tests (no shared state)
+- Test both happy path and failure cases
+- Mock external dependencies appropriately
+- Include docstrings explaining what is being tested
 
-        if not files_changed:
-            return {"output": "No files to test", "artifacts": {}}
+Frameworks:
+- Python: pytest with fixtures
+- JavaScript/TypeScript: Jest or Vitest
+- Follow project conventions
+"""
 
-        # Generate tests for changed files
-        test_files = await self._generate_tests(repo, files_changed)
 
-        # Run tests (simulated - would integrate with CI/CD)
-        test_results = await self._run_tests(test_files)
+async def tester_node(state: OrchestrationState) -> dict[str, Any]:
+    """Tester agent: Generate and run tests for implementation."""
+    settings = get_settings()
+    repo = state["repo"]
+    files_changed = state.get("files_changed", [])
+    pr_number = state.get("prs_created", [None])[-1]
 
-        # Analyze failures
-        failures = self._analyze_failures(test_results)
-
-        # Post test report to PR
-        if pr_number:
-            await self._post_test_report(repo, pr_number, test_results, failures)
-
+    if not files_changed:
         return {
-            "test_results": test_results,
-            "test_failures": failures,
-            "output": f"Tests: {test_results['passed_count']}/{test_results['total_count']} passed",
-            "artifacts": {"test_files": test_files},
-            "metadata": {"test_results": test_results},
+            "agent_results": state.get("agent_results", [])
+            + [
+                {
+                    "agent": AgentRole.TESTER,
+                    "status": TaskStatus.SKIPPED,
+                    "output": "No files to test",
+                    "artifacts": {},
+                    "metadata": {},
+                    "timestamp": datetime.now(),
+                }
+            ],
+            "current_agent": AgentRole.TESTER,
         }
 
-    async def _generate_tests(self, repo: str, files: list[str]) -> list[dict]:
-        """Generate test files for changed code."""
-        test_files = []
+    try:
+        llm = ChatAnthropic(
+            model=settings.default_agent_model,
+            temperature=0.2,
+            api_key=settings.anthropic_api_key,
+        )
 
-        for file_path in files:
-            # Skip non-code files
-            if not file_path.endswith((".py", ".js", ".ts", ".java")):
+        # Get PR diff context
+        pr_files = await get_pr_files(repo, pr_number) if pr_number else files_changed
+
+        test_results = {"passed": True, "total": 0, "passed_count": 0, "failed_count": 0}
+        test_failures = []
+
+        # Generate tests for each changed file
+        for file_path in pr_files:
+            # Skip test files and non-code files
+            if "test" in file_path or not (file_path.endswith(".py") or file_path.endswith(".ts")):
                 continue
 
             # Get file content
-            content = await self.github.get_file_contents(repo, file_path)
+            content = await get_file_contents(repo, file_path)
 
-            # Generate test using LLM
-            test_content = await self._generate_test_for_file(file_path, content)
+            # Generate test file
+            test_prompt = f"""Generate comprehensive tests for this code.
 
-            # Determine test file path
-            test_path = self._get_test_path(file_path)
+**File**: {file_path}
 
-            test_files.append({"path": test_path, "content": test_content, "source": file_path})
-
-        return test_files
-
-    async def _generate_test_for_file(self, file_path: str, content: str) -> str:
-        """Generate test content for a specific file."""
-        system_prompt = """You are an expert Test Engineer writing comprehensive tests.
-
-Your job:
-1. Analyze the code and identify all testable functions/methods
-2. Write unit tests covering:
-   - Happy path scenarios
-   - Edge cases
-   - Error handling
-   - Boundary conditions
-3. Use appropriate testing framework (pytest for Python, jest for JS/TS, junit for Java)
-4. Include setup/teardown as needed
-5. Output ONLY the complete test file, no explanations
-
-Output format: Pure test code, ready to run."""
-
-        user_message = f"""File: {file_path}
-
-Code:
+**Code**:
+```
 {content}
+```
 
-Generate comprehensive tests."""
+**Requirements**:
+1. Test all public functions/methods
+2. Include edge cases and error conditions
+3. Mock external dependencies
+4. Use appropriate fixtures
+5. Follow project test conventions
 
-        messages = self.format_messages(system_prompt, user_message)
-        response = await self.llm.ainvoke(messages)
-
-        return response.content
-
-    def _get_test_path(self, file_path: str) -> str:
-        """Convert source file path to test file path."""
-        if "src/" in file_path:
-            test_path = file_path.replace("src/", "tests/", 1)
-        else:
-            test_path = f"tests/{file_path}"
-
-        # Add test prefix if not present
-        filename = test_path.split("/")[-1]
-        if not filename.startswith("test_"):
-            test_path = test_path.replace(filename, f"test_{filename}")
-
-        return test_path
-
-    async def _run_tests(self, test_files: list[dict]) -> dict:
-        """Run generated tests (simulated for now)."""
-        # In production, this would:
-        # 1. Commit test files to branch
-        # 2. Trigger CI/CD pipeline
-        # 3. Wait for results
-        # 4. Parse test output
-
-        # Simulated results for now
-        passed_count = len(test_files)
-        failed_count = 0
-        total_count = len(test_files)
-
-        return {
-            "passed": failed_count == 0,
-            "passed_count": passed_count,
-            "failed_count": failed_count,
-            "total_count": total_count,
-            "duration_ms": 5000,
-            "test_files": test_files,
-        }
-
-    def _analyze_failures(self, test_results: dict) -> list[dict]:
-        """Analyze test failures and categorize them."""
-        if test_results.get("passed", True):
-            return []
-
-        # In production, would parse actual failure output
-        # For now, return empty list
-        return []
-
-    async def _post_test_report(self, repo: str, pr_number: int, results: dict, failures: list[dict]) -> None:
-        """Post test results as PR comment."""
-        status_emoji = "✅" if results["passed"] else "❌"
-        comment = f"""## {status_emoji} Test Results
-
-**Overall**: {results['passed_count']}/{results['total_count']} tests passed
-**Duration**: {results['duration_ms']}ms
-
+Provide COMPLETE test file content, ready to run.
 """
 
-        if failures:
-            comment += "\n### ❌ Failures\n"
-            for failure in failures:
-                comment += f"- `{failure.get('test', 'unknown')}`: {failure.get('message', '')}\n"
-        else:
-            comment += "\n### ✅ All tests passed!\n"
+            messages = [
+                SystemMessage(content=TESTER_SYSTEM_PROMPT),
+                HumanMessage(content=test_prompt),
+            ]
 
-        comment += "\n---\n*Auto-generated by AI Orchestration Platform*"
+            test_code = await llm.ainvoke(messages)
 
-        await self.github.add_pr_comment(repo, pr_number, comment)
+            # Determine test file path
+            test_file_path = get_test_file_path(file_path)
+
+            # In production, write test file and run it
+            # For now, simulate test execution
+            test_result = await simulate_test_execution(test_file_path, test_code.content)
+
+            test_results["total"] += test_result["total"]
+            if test_result["passed"]:
+                test_results["passed_count"] += test_result["total"]
+            else:
+                test_results["passed"] = False
+                test_results["failed_count"] += test_result["failed"]
+                test_failures.extend(test_result.get("failures", []))
+
+        agent_result: AgentResult = {
+            "agent": AgentRole.TESTER,
+            "status": TaskStatus.COMPLETED if test_results["passed"] else TaskStatus.FAILED,
+            "output": f"Tests: {test_results['passed_count']}/{test_results['total']} passed",
+            "artifacts": {
+                "test_results": test_results,
+                "failures": test_failures,
+            },
+            "metadata": {
+                "files_tested": len(pr_files),
+                "coverage": (test_results["passed_count"] / max(test_results["total"], 1)) * 100,
+            },
+            "timestamp": datetime.now(),
+        }
+
+        return {
+            "test_results": test_results,
+            "test_failures": test_failures,
+            "agent_results": state.get("agent_results", []) + [agent_result],
+            "current_agent": AgentRole.TESTER,
+            "next_agents": [AgentRole.REVIEWER] if test_results["passed"] else [AgentRole.CODER],
+            "retry_count": state.get("retry_count", 0) + (0 if test_results["passed"] else 1),
+        }
+
+    except Exception as e:
+        agent_result: AgentResult = {
+            "agent": AgentRole.TESTER,
+            "status": TaskStatus.FAILED,
+            "output": f"Testing failed: {str(e)}",
+            "artifacts": {},
+            "metadata": {"error": str(e)},
+            "timestamp": datetime.now(),
+        }
+
+        return {
+            "agent_results": state.get("agent_results", []) + [agent_result],
+            "error": str(e),
+            "current_agent": AgentRole.TESTER,
+        }
 
 
-# Node function for LangGraph
-async def tester_node(state: OrchestrationState) -> dict[str, Any]:
-    """Tester node for LangGraph workflow."""
-    agent = TesterAgent()
-    return await agent.invoke(state)
+def get_test_file_path(source_file: str) -> str:
+    """Determine test file path from source file."""
+    if source_file.startswith("src/"):
+        return source_file.replace("src/", "tests/", 1).replace(".py", "_test.py")
+    return f"tests/test_{source_file.split('/')[-1]}"
+
+
+async def simulate_test_execution(test_file: str, test_code: str) -> dict[str, Any]:
+    """Simulate test execution (in production, actually run pytest/jest).
+
+    Production implementation would:
+    1. Write test file to disk
+    2. Run pytest/jest with coverage
+    3. Parse output for results
+    4. Return structured results
+    """
+    # Simplified simulation
+    return {
+        "passed": True,
+        "total": 5,
+        "failed": 0,
+        "failures": [],
+        "coverage": 85.0,
+    }

@@ -1,4 +1,4 @@
-"""AI Agent implementations."""
+"""Agent implementations."""
 
 from .planner import planner_node
 from .coder import coder_node

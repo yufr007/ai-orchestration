@@ -1,7 +1,27 @@
-"""Tool integrations for MCP servers and external APIs."""
+"""Tool integrations for agents."""
 
-from .perplexity import PerplexityMCP
-from .github import GitHubTools
-from .mcp_manager import MCPManager
+from .perplexity import perplexity_research
+from .github import (
+    get_repository_context,
+    get_issue_details,
+    get_file_contents,
+    create_branch,
+    create_or_update_file,
+    create_pull_request,
+    add_pr_comment,
+    add_pr_review,
+    get_pr_diff,
+)
 
-__all__ = ["PerplexityMCP", "GitHubTools", "MCPManager"]
+__all__ = [
+    "perplexity_research",
+    "get_repository_context",
+    "get_issue_details",
+    "get_file_contents",
+    "create_branch",
+    "create_or_update_file",
+    "create_pull_request",
+    "add_pr_comment",
+    "add_pr_review",
+    "get_pr_diff",
+]

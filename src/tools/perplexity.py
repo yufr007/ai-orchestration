@@ -1,4 +1,4 @@
-"""Perplexity MCP integration for research and web search."""
+"""Perplexity MCP client for research and web search."""
 
 import asyncio
 import json
@@ -9,126 +9,96 @@ import httpx
 from src.config import get_settings
 
 
-class PerplexityMCP:
-    """Client for Perplexity MCP server."""
+class PerplexityClient:
+    """Client for Perplexity API via MCP server."""
 
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.api_key = self.settings.perplexity_api_key
-        self.model = self.settings.perplexity_model
-        self.timeout_ms = self.settings.perplexity_timeout_ms
         self.base_url = "https://api.perplexity.ai"
+        self.headers = {
+            "Authorization": f"Bearer {self.settings.perplexity_api_key}",
+            "Content-Type": "application/json",
+        }
 
-    async def search(self, query: str, **kwargs: Any) -> str:
-        """Perform a search using Perplexity API.
+    async def search(self, query: str, model: str | None = None) -> dict[str, Any]:
+        """Execute a Perplexity search.
 
         Args:
             query: Search query
-            **kwargs: Additional parameters (model, max_tokens, etc.)
+            model: Model to use (defaults to settings.perplexity_model)
 
         Returns:
-            Search results as formatted string
+            Search results with citations
         """
-        async with httpx.AsyncClient(timeout=self.timeout_ms / 1000) as client:
+        model = model or self.settings.perplexity_model
+
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a helpful research assistant. Provide accurate, well-cited information.",
+                },
+                {"role": "user", "content": query},
+            ],
+        }
+
+        async with httpx.AsyncClient(timeout=self.settings.perplexity_timeout_ms / 1000) as client:
             response = await client.post(
                 f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": kwargs.get("model", self.model),
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": query,
-                        }
-                    ],
-                    "max_tokens": kwargs.get("max_tokens"),
-                    "temperature": kwargs.get("temperature", 0.2),
-                    "search_domain_filter": kwargs.get("domain_filter", []),
-                    "return_images": kwargs.get("return_images", False),
-                    "return_related_questions": kwargs.get("return_related", False),
-                    "search_recency_filter": kwargs.get("recency_filter"),
-                },
+                headers=self.headers,
+                json=payload,
             )
-
             response.raise_for_status()
-            data = response.json()
+            return response.json()
 
-            # Extract content and citations
-            content = data["choices"][0]["message"]["content"]
-            citations = data.get("citations", [])
+    async def research(self, query: str) -> str:
+        """Perform research and return formatted results.
 
-            # Format results
-            result = content
+        Args:
+            query: Research question
+
+        Returns:
+            Formatted research findings with citations
+        """
+        try:
+            result = await self.search(query)
+            content = result["choices"][0]["message"]["content"]
+            citations = result.get("citations", [])
+
+            # Format output
+            output = f"{content}\n\n"
             if citations:
-                result += "\n\n**Sources:**\n"
+                output += "**Sources:**\n"
                 for i, citation in enumerate(citations, 1):
-                    result += f"{i}. {citation}\n"
+                    output += f"{i}. {citation}\n"
 
-            return result
+            return output
 
-    async def research(
-        self,
-        topic: str,
-        focus: str | None = None,
-        depth: str = "balanced",
-    ) -> dict[str, Any]:
-        """Conduct structured research on a topic.
+        except Exception as e:
+            return f"Research failed: {str(e)}"
 
-        Args:
-            topic: Main research topic
-            focus: Specific aspect to focus on
-            depth: Research depth (quick, balanced, deep)
 
-        Returns:
-            Structured research results with summary, findings, sources
-        """
-        # Build research query
-        query = f"Research: {topic}"
-        if focus:
-            query += f" with focus on {focus}"
+# Global client instance
+_client: PerplexityClient | None = None
 
-        # Adjust parameters based on depth
-        params = {
-            "quick": {"max_tokens": 512, "temperature": 0.3},
-            "balanced": {"max_tokens": 1024, "temperature": 0.2},
-            "deep": {"max_tokens": 2048, "temperature": 0.1},
-        }[depth]
 
-        results = await self.search(query, **params, return_related=True)
+def get_perplexity_client() -> PerplexityClient:
+    """Get or create Perplexity client singleton."""
+    global _client
+    if _client is None:
+        _client = PerplexityClient()
+    return _client
 
-        return {
-            "topic": topic,
-            "focus": focus,
-            "depth": depth,
-            "findings": results,
-            "timestamp": asyncio.get_event_loop().time(),
-        }
 
-    async def compare(
-        self,
-        options: list[str],
-        criteria: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Compare multiple options based on criteria.
+async def perplexity_research(query: str) -> str:
+    """Convenience function for research.
 
-        Args:
-            options: List of options to compare
-            criteria: Comparison criteria
+    Args:
+        query: Research question
 
-        Returns:
-            Structured comparison results
-        """
-        query = f"Compare: {', '.join(options)}"
-        if criteria:
-            query += f" based on: {', '.join(criteria)}"
-
-        results = await self.search(query, max_tokens=1536)
-
-        return {
-            "options": options,
-            "criteria": criteria,
-            "comparison": results,
-        }
+    Returns:
+        Formatted research results
+    """
+    client = get_perplexity_client()
+    return await client.research(query)

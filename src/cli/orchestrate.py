@@ -1,4 +1,4 @@
-"""Main CLI for orchestration."""
+"""CLI command to run orchestration workflows."""
 
 import asyncio
 from datetime import datetime
@@ -6,81 +6,66 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from src.config import get_settings
 from src.core.graph import create_orchestration_graph
 from src.core.state import OrchestrationState
 
+
 app = typer.Typer(
     name="orchestrate",
-    help="AI Orchestration Platform - Autonomous software development",
+    help="AI Orchestration Platform CLI",
 )
+
 console = Console()
 
 
 @app.command()
 def run(
-    repo: str = typer.Option(..., "--repo", "-r", help="Repository (owner/repo)"),
+    repo: str = typer.Option(..., "--repo", "-r", help="Repository (owner/name)"),
     issue: int | None = typer.Option(None, "--issue", "-i", help="Issue number"),
-    pr: int | None = typer.Option(None, "--pr", "-p", help="PR number to review"),
-    spec: Path | None = typer.Option(None, "--spec", "-s", help="Spec file path"),
-    mode: str = typer.Option(
-        "autonomous",
-        "--mode",
-        "-m",
-        help="Mode: autonomous, plan, review",
-    ),
-    trace: bool = typer.Option(False, "--trace", help="Enable LangSmith tracing"),
+    pr: int | None = typer.Option(None, "--pr", "-p", help="PR number"),
+    spec: Path | None = typer.Option(None, "--spec", "-s", help="Specification file"),
+    mode: str = typer.Option("autonomous", "--mode", "-m", help="Mode: autonomous, plan, review"),
+    max_retries: int = typer.Option(3, "--max-retries", help="Maximum retry attempts"),
 ) -> None:
-    """Run orchestration workflow."""
-    asyncio.run(_run_async(repo, issue, pr, spec, mode, trace))
+    """Run an orchestration workflow."""
+    asyncio.run(run_workflow(repo, issue, pr, spec, mode, max_retries))
 
 
-async def _run_async(
+async def run_workflow(
     repo: str,
-    issue: int | None,
-    pr: int | None,
-    spec: Path | None,
+    issue_number: int | None,
+    pr_number: int | None,
+    spec_path: Path | None,
     mode: str,
-    trace: bool,
+    max_retries: int,
 ) -> None:
-    """Async implementation of run command."""
-    settings = get_settings()
-
-    # Enable tracing if requested
-    if trace and settings.langsmith_api_key:
-        import os
-
-        os.environ["LANGCHAIN_TRACING_V2"] = "true"
-        console.print("[green]✓[/green] LangSmith tracing enabled")
-
+    """Run the orchestration workflow."""
+    console.print(f"\n[bold blue]✨ AI Orchestration Platform[/bold blue]")
+    console.print(f"Repository: [cyan]{repo}[/cyan]")
+    console.print(f"Mode: [yellow]{mode}[/yellow]\n")
+    
     # Load spec if provided
     spec_content = None
-    if spec and spec.exists():
-        spec_content = spec.read_text()
-        console.print(f"[green]✓[/green] Loaded spec from {spec}")
-
+    if spec_path:
+        if not spec_path.exists():
+            console.print(f"[red]❌ Spec file not found: {spec_path}[/red]")
+            raise typer.Exit(1)
+        spec_content = spec_path.read_text()
+    
     # Validate inputs
-    if not issue and not pr and not spec_content:
-        console.print("[red]Error:[/red] Must provide --issue, --pr, or --spec")
+    if not issue_number and not pr_number and not spec_content:
+        console.print("[red]❌ Must provide --issue, --pr, or --spec[/red]")
         raise typer.Exit(1)
-
-    console.print(f"\n[bold blue]AI Orchestration Platform[/bold blue]")
-    console.print(f"Repository: {repo}")
-    console.print(f"Mode: {mode}")
-    if issue:
-        console.print(f"Issue: #{issue}")
-    if pr:
-        console.print(f"PR: #{pr}")
-    console.print()
-
+    
     # Create initial state
     initial_state: OrchestrationState = {
         "repo": repo,
-        "issue_number": issue,
-        "pr_number": pr,
+        "issue_number": issue_number,
+        "pr_number": pr_number,
         "spec_content": spec_content,
         "mode": mode,
         "messages": [],
@@ -97,121 +82,70 @@ async def _run_async(
         "current_agent": None,
         "next_agents": [],
         "retry_count": 0,
-        "max_retries": 3,
+        "max_retries": max_retries,
         "started_at": datetime.now(),
         "completed_at": None,
         "error": None,
     }
-
+    
     # Create and run graph
+    console.print("[bold]🚀 Starting orchestration...[/bold]\n")
+    
     graph = create_orchestration_graph()
     config = {"configurable": {"thread_id": f"cli-{datetime.now().timestamp()}"}}
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Running orchestration...", total=None)
-
-        try:
-            result = await graph.ainvoke(initial_state, config=config)
-
-            progress.update(task, completed=True, description="[green]✓ Complete[/green]")
-
-            # Display results
-            display_results(result)
-
-        except Exception as e:
-            progress.update(task, description=f"[red]✗ Failed: {e}[/red]")
-            raise
-
-
-def display_results(result: OrchestrationState) -> None:
-    """Display orchestration results."""
-    console.print("\n[bold green]Results[/bold green]\n")
-
-    # Agent results table
-    table = Table(title="Agent Execution")
-    table.add_column("Agent", style="cyan")
-    table.add_column("Status", style="magenta")
-    table.add_column("Output", style="white")
-
-    for agent_result in result.get("agent_results", []):
-        status_emoji = "✓" if agent_result["status"] == "completed" else "✗"
-        table.add_row(
-            agent_result["agent"].value,
-            f"{status_emoji} {agent_result['status'].value}",
-            agent_result["output"][:100] + "..." if len(agent_result["output"]) > 100 else agent_result["output"],
-        )
-
-    console.print(table)
-
-    # Plan summary
-    if result.get("plan"):
-        console.print("\n[bold]Plan Summary[/bold]")
-        plan = result["plan"]
-        console.print(f"Tasks: {len(plan.get('tasks', []))}")
-        console.print(f"Complexity: {plan.get('estimated_complexity', 'unknown')}")
-
-    # Implementation summary
-    if result.get("files_changed"):
-        console.print("\n[bold]Implementation[/bold]")
-        console.print(f"Files changed: {len(result['files_changed'])}")
-        for file in result["files_changed"][:5]:
-            console.print(f"  • {file}")
-        if len(result["files_changed"]) > 5:
-            console.print(f"  ... and {len(result['files_changed']) - 5} more")
-
-    # PR links
-    if result.get("prs_created"):
-        console.print("\n[bold]Pull Requests[/bold]")
-        for pr_num in result["prs_created"]:
-            pr_url = f"https://github.com/{result['repo']}/pull/{pr_num}"
-            console.print(f"  • PR #{pr_num}: {pr_url}")
-
-    # Test results
-    if result.get("test_results"):
-        test_res = result["test_results"]
-        console.print("\n[bold]Testing[/bold]")
-        console.print(
-            f"Tests: {test_res.get('passed_tests', 0)}/{test_res.get('total_tests', 0)} passed"
-        )
-        console.print(f"Coverage: {test_res.get('coverage', 0)}%")
-
-    console.print()
-
-
-@app.command()
-def init() -> None:
-    """Initialize configuration and verify setup."""
-    console.print("[bold blue]Initializing AI Orchestration Platform[/bold blue]\n")
-
+    
     try:
-        settings = get_settings()
-
-        # Check required keys
-        checks = [
-            ("Perplexity API", bool(settings.perplexity_api_key)),
-            ("GitHub Token", bool(settings.github_token)),
-            (
-                "LLM API",
-                bool(settings.anthropic_api_key or settings.openai_api_key),
-            ),
-        ]
-
-        for name, status in checks:
-            symbol = "[green]✓[/green]" if status else "[red]✗[/red]"
-            console.print(f"{symbol} {name}")
-
-        if all(status for _, status in checks):
-            console.print("\n[green]✓ Setup complete![/green]")
-        else:
-            console.print("\n[yellow]⚠ Some configurations missing. Check .env file.[/yellow]")
-
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Running workflow...", total=None)
+            
+            final_state = None
+            async for state in graph.astream(initial_state, config):
+                # Update progress with current agent
+                if "current_agent" in state and state["current_agent"]:
+                    progress.update(task, description=f"Agent: {state['current_agent'].value}")
+                final_state = state
+        
+        # Display results
+        console.print("\n[bold green]✅ Orchestration completed![/bold green]\n")
+        
+        display_results(final_state)
+    
     except Exception as e:
-        console.print(f"\n[red]✗ Error: {e}[/red]")
+        console.print(f"\n[bold red]❌ Orchestration failed:[/bold red] {e}\n")
         raise typer.Exit(1)
+
+
+def display_results(state: OrchestrationState) -> None:
+    """Display orchestration results in a table."""
+    # Agent results table
+    table = Table(title="Agent Results")
+    table.add_column("Agent", style="cyan")
+    table.add_column("Status", style="yellow")
+    table.add_column("Output", style="white")
+    
+    for result in state.get("agent_results", []):
+        status_emoji = "✅" if result["status"] == "completed" else "❌"
+        table.add_row(
+            result["agent"].value,
+            f"{status_emoji} {result['status']}",
+            result["output"][:80] + "..." if len(result["output"]) > 80 else result["output"],
+        )
+    
+    console.print(table)
+    
+    # Summary
+    console.print("\n[bold]Summary:[/bold]")
+    console.print(f"Files changed: {len(state.get('files_changed', []))}")
+    console.print(f"Branches created: {len(state.get('branches_created', []))}")
+    console.print(f"PRs created: {len(state.get('prs_created', []))}")
+    
+    if state.get("prs_created"):
+        for pr_num in state["prs_created"]:
+            console.print(f"\n[bold blue]🔗 PR #{pr_num}:[/bold blue] {state['repo']}/pull/{pr_num}")
 
 
 if __name__ == "__main__":

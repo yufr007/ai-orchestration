@@ -1,6 +1,6 @@
-"""MCP tool integrations for agents."""
+"""Tools for agent operations."""
 
-from .perplexity import perplexity_research, perplexity_search
+from .perplexity import research_with_perplexity
 from .github import (
     get_issue_details,
     get_pr_details,
@@ -8,21 +8,18 @@ from .github import (
     create_branch,
     create_or_update_file,
     create_pull_request,
-    add_pr_comment,
-    add_pr_review,
     get_pr_diff,
+    add_pr_review_comment,
 )
 
 __all__ = [
-    "perplexity_research",
-    "perplexity_search",
+    "research_with_perplexity",
     "get_issue_details",
     "get_pr_details",
     "get_file_contents",
     "create_branch",
     "create_or_update_file",
     "create_pull_request",
-    "add_pr_comment",
-    "add_pr_review",
     "get_pr_diff",
+    "add_pr_review_comment",
 ]

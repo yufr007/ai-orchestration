@@ -1,6 +1,5 @@
-"""Reviewer agent: Code review and quality gates."""
+"""Reviewer agent - Code review with quality gates."""
 
-import asyncio
 from datetime import datetime
 from typing import Any
 
@@ -9,186 +8,157 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import get_settings
 from src.core.state import AgentResult, AgentRole, OrchestrationState, TaskStatus
-from src.tools.github import get_pr_diff, add_pr_review, get_file_contents
+from src.tools.github import get_pr_diff, add_pr_review_comment
 
-settings = get_settings()
 
-REVIEWER_SYSTEM_PROMPT = """You are an elite Senior Engineer performing code review.
+REVIEWER_SYSTEM_PROMPT = """You are an elite Staff Engineer performing code reviews.
 
-Your review criteria:
-1. **Correctness**: Does the code do what it's supposed to?
-2. **Design**: Is the solution well-architected and maintainable?
-3. **Complexity**: Is the code unnecessarily complex?
-4. **Tests**: Are there adequate tests?
-5. **Naming**: Are variables, functions, and classes well-named?
-6. **Comments**: Are complex sections documented?
-7. **Style**: Does it follow project conventions?
-8. **Security**: Are there security vulnerabilities?
-9. **Performance**: Are there obvious performance issues?
-10. **Error handling**: Are errors handled gracefully?
+Your responsibilities:
+1. Review code for correctness, maintainability, and best practices
+2. Check for security vulnerabilities and performance issues
+3. Ensure consistent style and proper documentation
+4. Verify tests cover edge cases
+5. Provide constructive, actionable feedback
 
-Provide constructive feedback:
-- Highlight what's done well
-- Suggest specific improvements with examples
-- Identify potential bugs or edge cases
-- Rate severity: CRITICAL (blocks merge), MAJOR (should fix), MINOR (nice to have)
+Review Checklist:
+- Code Quality: DRY, SOLID principles, proper abstractions
+- Security: Input validation, SQL injection, XSS, secrets
+- Performance: Time complexity, memory usage, database queries
+- Error Handling: Proper exceptions, logging, user feedback
+- Testing: Coverage, edge cases, mocks
+- Documentation: Docstrings, comments, README updates
+- Style: Consistent formatting, naming conventions
 
-Output structured review:
-- overall_verdict: "APPROVE" | "REQUEST_CHANGES" | "COMMENT"
-- summary: Brief overview of review
-- strengths: What was done well
-- issues: Array of {severity, file, line, description, suggestion}
+Provide feedback in this format:
+{
+  "decision": "approve|request_changes|comment",
+  "summary": "Overall assessment",
+  "comments": [
+    {
+      "file": "path/to/file.py",
+      "line": 42,
+      "severity": "critical|major|minor|suggestion",
+      "category": "security|performance|style|documentation",
+      "issue": "Description of issue",
+      "suggestion": "How to fix it"
+    }
+  ],
+  "positives": ["Good practice 1", "Good practice 2"],
+  "requires_changes": true/false
+}
+
+Be thorough but fair. Recognize good practices as well as issues.
 """
 
 
 async def reviewer_node(state: OrchestrationState) -> dict[str, Any]:
-    """Execute the reviewer agent to perform code review."""
-    print("\n👀 REVIEWER: Starting code review phase...")
-
+    """Reviewer agent node - perform code review."""
+    settings = get_settings()
     repo = state["repo"]
-    pr_number = state.get("prs_created", [None])[-1]
-    files_changed = state.get("files_changed", [])
+    prs_created = state.get("prs_created", [])
+    pr_number = state.get("pr_number") or (prs_created[0] if prs_created else None)
 
     if not pr_number:
+        agent_result: AgentResult = {
+            "agent": AgentRole.REVIEWER,
+            "status": TaskStatus.SKIPPED,
+            "output": "No PR to review",
+            "artifacts": {},
+            "metadata": {},
+            "timestamp": datetime.now(),
+        }
         return {
-            "approval_status": "no_pr",
-            "agent_results": [
-                AgentResult(
-                    agent=AgentRole.REVIEWER,
-                    status=TaskStatus.SKIPPED,
-                    output="No PR to review",
-                    artifacts={},
-                    metadata={},
-                    timestamp=datetime.now(),
-                )
-            ],
+            "agent_results": state.get("agent_results", []) + [agent_result],
+            "current_agent": AgentRole.REVIEWER,
+            "approval_status": "skipped",
         }
 
-    # Initialize LLM
     llm = ChatAnthropic(
         model=settings.default_agent_model,
-        temperature=0.3,
+        temperature=0.2,
         api_key=settings.anthropic_api_key,
     )
 
     # Get PR diff
-    print(f"📥 REVIEWER: Fetching PR #{pr_number} diff...")
-    pr_diff = await get_pr_diff(repo, pr_number)
+    try:
+        pr_diff = await get_pr_diff(repo, pr_number)
+    except Exception as e:
+        pr_diff = f"Error getting diff: {e}"
 
-    # Get full file contents for context
-    branch = state.get("branches_created", [None])[-1]
-    file_contents = await asyncio.gather(
-        *[
-            get_file_contents(repo, file, branch)
-            for file in files_changed[:5]  # Limit to avoid token overflow
-        ],
-        return_exceptions=True,
-    )
+    # Build review context
+    context = f"""Pull Request #{pr_number}
 
-    files_context = "\n\n".join(
-        f"**{file}:**\n```\n{content[:2000]}...\n```"
-        for file, content in zip(files_changed, file_contents)
-        if not isinstance(content, Exception)
-    )
+Changes:
+{pr_diff[:10000]}  # Limit context size
 
-    # Perform review
-    print("🔍 REVIEWER: Analyzing code quality...")
+Perform a thorough code review covering security, performance, maintainability, and testing.
+"""
+
     messages = [
         SystemMessage(content=REVIEWER_SYSTEM_PROMPT),
-        HumanMessage(
-            content=f"""Review this pull request:
-
-**Diff:**
-```diff
-{pr_diff[:8000]}...
-```
-
-**Full file context:**
-{files_context}
-
-Provide comprehensive code review in JSON format."""
-        ),
+        HumanMessage(content=context),
     ]
 
     response = await llm.ainvoke(messages)
-    review_text = response.content
 
-    # Parse review (extract JSON if present)
+    # Parse response
     import json
 
     try:
-        if "```json" in review_text:
-            review_text = review_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in review_text:
-            review_text = review_text.split("```")[1].split("```")[0].strip()
-        review = json.loads(review_text)
+        review = json.loads(response.content)
     except json.JSONDecodeError:
-        # Fallback to unstructured review
-        review = {
-            "overall_verdict": "COMMENT",
-            "summary": review_text,
-            "strengths": [],
-            "issues": [],
-        }
+        content = response.content
+        if "```json" in content:
+            json_start = content.find("```json") + 7
+            json_end = content.find("```", json_start)
+            review = json.loads(content[json_start:json_end].strip())
+        else:
+            # Fallback
+            review = {
+                "decision": "comment",
+                "summary": "Review completed",
+                "comments": [],
+                "positives": [],
+                "requires_changes": False,
+            }
 
-    # Extract review decision
-    verdict = review.get("overall_verdict", "COMMENT").upper()
-    approval_status = (
-        "approved" if verdict == "APPROVE" else "changes_requested" if verdict == "REQUEST_CHANGES" else "commented"
-    )
+    # Post review comments to PR
+    review_comments = []
+    for comment in review.get("comments", []):
+        try:
+            await add_pr_review_comment(
+                repo=repo,
+                pr_number=pr_number,
+                body=f"**{comment['severity'].upper()}** ({comment['category']})\n\n"
+                f"{comment['issue']}\n\n"
+                f"**Suggestion:** {comment['suggestion']}",
+                path=comment.get("file"),
+                line=comment.get("line"),
+            )
+            review_comments.append(comment)
+        except Exception:
+            pass
 
-    # Format review comment
-    issues = review.get("issues", [])
-    critical_issues = [i for i in issues if i.get("severity") == "CRITICAL"]
-    major_issues = [i for i in issues if i.get("severity") == "MAJOR"]
-    minor_issues = [i for i in issues if i.get("severity") == "MINOR"]
+    # Determine approval status
+    approval_status = "approved" if review["decision"] == "approve" else "changes_requested"
 
-    review_comment = f"""## 👀 Code Review
-
-**Verdict:** {verdict}
-
-### Summary
-{review.get('summary', 'Review complete')}
-
-### ✨ Strengths
-{''.join(f"- {s}\n" for s in review.get('strengths', [])) or '- Implementation follows requirements'}
-
-### 📋 Issues Found
-
-{f"#### 🚨 Critical ({len(critical_issues)})\n" + ''.join(f"- **{i.get('file', 'general')}**: {i.get('description')}\n  *Suggestion:* {i.get('suggestion', 'Fix required')}\n" for i in critical_issues) if critical_issues else ''}
-
-{f"#### ⚠️ Major ({len(major_issues)})\n" + ''.join(f"- **{i.get('file', 'general')}**: {i.get('description')}\n  *Suggestion:* {i.get('suggestion', 'Should fix')}\n" for i in major_issues) if major_issues else ''}
-
-{f"#### ℹ️ Minor ({len(minor_issues)})\n" + ''.join(f"- **{i.get('file', 'general')}**: {i.get('description')}\n" for i in minor_issues) if minor_issues else ''}
-
-{'### ✅ No issues found - Ready to merge!' if not issues else ''}
-
----
-*Generated by AI Orchestration Platform - Reviewer Agent*
-"""
-
-    # Post review to PR
-    print(f"💬 REVIEWER: Posting review ({verdict})...")
-    await add_pr_review(repo, pr_number, review_comment, verdict)
-
-    print(f"{'✅' if verdict == 'APPROVE' else '📝'} REVIEWER: Review complete - {verdict}")
+    agent_result: AgentResult = {
+        "agent": AgentRole.REVIEWER,
+        "status": TaskStatus.COMPLETED,
+        "output": review["summary"],
+        "artifacts": {"review": review},
+        "metadata": {
+            "comments_count": len(review_comments),
+            "critical_issues": sum(
+                1 for c in review_comments if c.get("severity") == "critical"
+            ),
+        },
+        "timestamp": datetime.now(),
+    }
 
     return {
+        "review_comments": review_comments,
         "approval_status": approval_status,
-        "review_comments": issues,
+        "agent_results": state.get("agent_results", []) + [agent_result],
         "current_agent": AgentRole.REVIEWER,
-        "agent_results": [
-            AgentResult(
-                agent=AgentRole.REVIEWER,
-                status=TaskStatus.COMPLETED,
-                output=f"Review: {verdict}",
-                artifacts={"review": review, "verdict": verdict},
-                metadata={
-                    "critical_issues": len(critical_issues),
-                    "major_issues": len(major_issues),
-                    "minor_issues": len(minor_issues),
-                },
-                timestamp=datetime.now(),
-            )
-        ],
     }

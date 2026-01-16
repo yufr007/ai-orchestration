@@ -1,0 +1,20 @@
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/usr/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/home/chris/projects/ai-orchestration/src/cli/orchestrate.py", line 13, in <module>
+    from src.core.graph import create_orchestration_graph
+  File "/home/chris/projects/ai-orchestration/src/core/__init__.py", line 3, in <module>
+    from .graph import create_orchestration_graph
+  File "/home/chris/projects/ai-orchestration/src/core/graph.py", line 8, in <module>
+    from src.agents.planner import planner_node
+  File "/home/chris/projects/ai-orchestration/src/agents/__init__.py", line 3, in <module>
+    from .planner import planner_node
+  File "/home/chris/projects/ai-orchestration/src/agents/planner.py", line 5, in <module>
+    from src.tools.perplexity import perplexity_research
+  File "/home/chris/projects/ai-orchestration/src/tools/__init__.py", line 4, in <module>
+    from .github_adapter import (
+  File "/home/chris/projects/ai-orchestration/src/tools/github_adapter.py", line 17, in <module>
+    from src.core.config import get_settings
+ModuleNotFoundError: No module named 'src.core.config'

@@ -8,7 +8,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import get_settings
 from src.core.state import AgentResult, AgentRole, OrchestrationState, TaskStatus
-from src.tools.github import get_pr_details, add_pr_review_comment
+from src.tools.github_adapter import get_pr_details, add_pr_review_comment
 
 
 REVIEWER_SYSTEM_PROMPT = """You are an elite Senior Engineer performing code review.

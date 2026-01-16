@@ -1,65 +1,18 @@
-# Agent Configuration
-# Customize agent behavior, models, and tool access
-
 agents:
   planner:
-    name: "Technical Lead & Planner"
-    model: "claude-3-5-sonnet-20241022"
+    model: claude-3-5-sonnet-20241022
     temperature: 0.3
-    max_tokens: 4000
+    max_tokens: 4096
     tools:
       - perplexity_research
-      - github_get_issue
-      - github_get_pr
+      - github_issues
+      - github_search
     max_iterations: 3
-    description: "Researches requirements and creates execution plans"
-  
-  coder:
-    name: "Staff Engineer"
-    model: "claude-3-5-sonnet-20241022"
-    temperature: 0.2
-    max_tokens: 8000
-    parallelism: 3
-    tools:
-      - github_get_file
-      - github_create_file
-      - github_update_file
-      - github_create_branch
-      - github_create_pr
-    max_files_per_pr: 15
-    description: "Implements features with parallel file operations"
-  
-  tester:
-    name: "QA Engineer"
-    model: "claude-3-5-sonnet-20241022"
-    temperature: 0.2
-    max_tokens: 6000
-    tools:
-      - github_get_file
-      - pytest_run
-    min_coverage: 80
-    description: "Generates and executes comprehensive tests"
-  
-  reviewer:
-    name: "Senior Code Reviewer"
-    model: "claude-3-5-sonnet-20241022"
-    temperature: 0.3
-    max_tokens: 6000
-    tools:
-      - github_get_pr
-      - github_add_review
-      - github_add_comment
-    quality_gates:
-      - no_secrets
-      - no_hardcoded_values
-      - proper_error_handling
-      - documentation_present
-    description: "Reviews code quality and enforces standards"
+    description: "Architects the solution and creates the implementation plan."
 
-# Global settings
-global:
-  max_retries: 3
-  retry_delay_seconds: 5
-  timeout_seconds: 600
-  enable_tracing: true
-  log_level: "INFO"
+  designer:
+    model: claude-3-5-sonnet-20241022
+    temperature: 0.4
+    tools:
+      - perplexity_research
+    description: "Designs premium UX/UI and generates assets."

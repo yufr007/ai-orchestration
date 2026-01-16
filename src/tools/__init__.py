@@ -1,7 +1,7 @@
 """Tool integrations for agents."""
 
 from .perplexity import perplexity_research
-from .github import (
+from .github_adapter import (
     get_issue_details,
     get_pr_details,
     get_file_contents,

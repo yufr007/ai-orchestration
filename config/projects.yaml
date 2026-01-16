@@ -1,54 +1,6 @@
-# Project Configuration
-# Map target repositories and their specific settings
-
 projects:
-  vitaflow:
-    repo: "yufr007/vitaflow"
-    branch: "main"
-    specs_dir: "docs/specs"
-    enabled_agents:
-      - planner
-      - coder
-      - tester
-      - reviewer
-    settings:
-      min_test_coverage: 85
-      require_review: true
-      auto_merge: false
-    labels:
-      - "ai-generated"
-      - "needs-review"
-  
   autom8:
-    repo: "yufr007/autom8"
-    branch: "develop"
-    specs_dir: "specs"
-    enabled_agents:
-      - planner
-      - coder
-      - devops
-      - security
-      - tester
-      - reviewer
-    settings:
-      min_test_coverage: 90
-      require_review: true
-      require_security_scan: true
-      auto_merge: false
-    labels:
-      - "ai-orchestration"
-      - "automated"
-  
-  # Add more projects as needed
-  default:
-    branch: "main"
-    specs_dir: "docs"
-    enabled_agents:
-      - planner
-      - coder
-      - tester
-      - reviewer
-    settings:
-      min_test_coverage: 80
-      require_review: true
-      auto_merge: false
+    repo: yufr007/autom8
+    branch: develop
+    specs_dir: specs
+    description: \

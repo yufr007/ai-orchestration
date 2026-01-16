@@ -11,7 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import get_settings
 from src.core.state import AgentResult, AgentRole, OrchestrationState, TaskStatus
-from src.tools.github import get_file_contents
+from src.tools.github_adapter import get_file_contents
 
 
 TESTER_SYSTEM_PROMPT = """You are an elite QA Engineer responsible for comprehensive testing.

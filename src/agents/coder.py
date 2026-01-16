@@ -2,7 +2,7 @@
 
 from src.core.state import OrchestrationState, AgentRole, TaskStatus
 from src.agents.base import BaseAgent
-from src.tools.github import (
+from src.tools.github_adapter import (
     create_branch,
     get_file_content,
     update_file,

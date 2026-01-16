@@ -2,7 +2,7 @@
 
 import asyncio
 
-from src.tools.github import get_github_client
+from src.tools.github_adapter import get_github_client
 
 
 async def test_github() -> None:

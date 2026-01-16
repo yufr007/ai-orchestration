@@ -3,7 +3,7 @@
 from src.core.state import OrchestrationState, AgentRole, TaskStatus
 from src.agents.base import BaseAgent
 from src.tools.perplexity import perplexity_research
-from src.tools.github import get_issue_details, get_pr_details
+from src.tools.github_adapter import get_issue_details, get_pr_details
 
 PLANNER_SYSTEM_PROMPT = """You are an elite Tech Lead / Architect for a Silicon Valley startup.
 
